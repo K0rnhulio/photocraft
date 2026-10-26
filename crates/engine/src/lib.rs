@@ -132,6 +132,7 @@ pub mod type_mask_cmds;
 pub mod type_spell_cmds;
 pub mod type_styles_cmds;
 pub mod updates_cmds;
+pub mod uv_preflight_cmds;
 mod variables_cmds;
 pub use variables_cmds::{export_data_sets_with, import_data_sets_text};
 pub mod vector_cmds;
