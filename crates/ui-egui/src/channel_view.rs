@@ -16,6 +16,8 @@ use photocraft_raster::{Surface, from_rgba, to_rgba};
 
 use crate::PhotocraftApp;
 
+mod print_preview;
+
 /// Largest overlay texture side; bigger documents show a downsampled overlay.
 const MAX_SIDE: u32 = 4096;
 /// Limit the sampled float composite to 128 MiB across open documents.
@@ -128,6 +130,17 @@ fn render_with_source(
 ) -> Option<Vec<Color32>> {
     if v.is_plain(doc) || r.is_empty() {
         return None;
+    }
+    // UV print preview: the image on its material with white ink and varnish, in place of the
+    // eyes' view (it shows every white and varnish channel by itself).
+    if let Some(pp) = v.print_preview {
+        let n = (r.width().div_ceil(factor) * r.height().div_ceil(factor)) as usize;
+        let computed = if source.cached.is_some_and(|px| px.len() == n) { None } else { Some(composite(doc, r, factor)) };
+        let px = print_preview::render(doc, pp, r, factor, source.cached.filter(|px| px.len() == n).or(computed.as_deref())?);
+        if n <= MAX_COMPOSITE_CACHE_PIXELS {
+            *source.fresh = computed;
+        }
+        return Some(px);
     }
     let in_color = look.in_color;
     let (mask_rgb, mask_opacity) = (look.mask_rgb, look.mask_opacity.clamp(0.0, 1.0));
