@@ -839,6 +839,13 @@ impl AlphaChannel {
     pub fn overlay_coverage(&self, v: f32) -> f32 {
         if self.spot.is_some() || self.indicates == ColorIndicates::SelectedAreas { v } else { 1.0 - v }
     }
+
+    /// The gray a channel value `v` shows as when the channel is drawn by itself (its thumbnail,
+    /// or the canvas with only this channel visible). A spot channel reads like a printing plate,
+    /// as in Photoshop and the RIP: black where there is ink, white where there is none.
+    pub fn display_gray(&self, v: f32) -> f32 {
+        if self.spot.is_some() { 1.0 - v } else { v }
+    }
 }
 
 /// A raw PSD global tagged block: (signature, key, data).

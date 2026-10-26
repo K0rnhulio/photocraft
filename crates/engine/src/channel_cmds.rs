@@ -1265,6 +1265,11 @@ const MAX_UNDERBASE_PIXELS: u64 = 1 << 30;
 /// by that many pixels so white doesn't peek out around the colour. A spot channel already
 /// named `name` is updated in place (keeping its ink), so running it again after an edit
 /// replaces the old white instead of stacking a second channel.
+///
+/// With `hardEdges` (the default) a pixel gets full ink when it is at least half selected (or
+/// half opaque) and none otherwise. A RIP reads any gray as partial ink, so a feathered or
+/// fuzzy selection (Color Range, a soft brush in Quick Mask) would otherwise lay a faint coat
+/// of white over the whole background.
 fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "channel.uvInk";
     let name = match p.get("name") {
@@ -1284,6 +1289,10 @@ fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
             .as_f64()
             .filter(|c| (0.0..=MAX_UNDERBASE_CHOKE).contains(c))
             .ok_or_else(|| bad(cmd, format!("`choke` must be a number of pixels in 0..{MAX_UNDERBASE_CHOKE}")))?,
+    };
+    let hard = match p.get("hardEdges") {
+        None | Some(Value::Null) => true,
+        Some(v) => v.as_bool().ok_or_else(|| bad(cmd, "`hardEdges` must be true or false"))?,
     };
     let color = color_value(cmd, p, "color")?;
     let solidity = match p.get("solidity") {
@@ -1317,6 +1326,11 @@ fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
     };
     if choke > 0.0 {
         mask = sel::contract(&mask, area.width() as usize, area.height() as usize, choke as f32);
+    }
+    if hard {
+        for v in &mut mask {
+            *v = if *v >= 0.5 { 1.0 } else { 0.0 };
+        }
     }
     if mask.iter().all(|v| *v <= 0.0) {
         let why =
@@ -2093,7 +2107,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "UV Ink Channel…",
             [],
             None,
-            r##"{"name":str="W1" (MainTop: W1/W2 white, W3/W4 varnish),"source":"auto|selection|artwork"="auto" (auto: the selection, or the non-transparent artwork without one),"choke":0..100=0 (pixels to shrink the ink by),"color":"#rrggbb"?=white, pale yellow for varnish,"solidity":0..100?=0} (creates, or updates in place, a white underbase or varnish spot channel for UV printing)"##,
+            r##"{"name":str="W1" (MainTop: W1/W2 white, W3/W4 varnish),"source":"auto|selection|artwork"="auto" (auto: the selection, or the non-transparent artwork without one),"choke":0..100=0 (pixels to shrink the ink by),"hardEdges":bool=true (full ink where at least half selected, none elsewhere; false keeps soft edges as partial ink),"color":"#rrggbb"?=white, pale yellow for varnish,"solidity":0..100?=0} (creates, or updates in place, a white underbase or varnish spot channel for UV printing)"##,
             has_doc,
             uv_ink_channel
         ),

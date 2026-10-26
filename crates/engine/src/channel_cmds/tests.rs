@@ -619,6 +619,42 @@ fn uv_ink_rejects_bad_params_and_an_alpha_channel_of_that_name() {
 }
 
 #[test]
+fn uv_ink_hard_edges_leave_no_faint_ink_outside_a_soft_selection() {
+    let mut s = session();
+    rect(&mut s, 10, 5, 20, 10, "replace");
+    s.execute("select.modify.feather", json!({"radius": 4})).unwrap();
+    // A feathered selection reaches past the rectangle with low values.
+    assert!(sel_at(&s, 7, 10) > 0.0 && sel_at(&s, 7, 10) < 0.5);
+    s.execute("channel.uvInk", json!({})).unwrap();
+    let all: Vec<f32> = (0..20).flat_map(|y| (0..40).map(move |x| (x, y))).map(|(x, y)| chan(&s, 0, x, y)).collect();
+    assert!(all.iter().all(|v| *v == 0.0 || *v == 1.0), "only full ink or none");
+    assert_eq!((chan(&s, 0, 7, 10), chan(&s, 0, 0, 0), chan(&s, 0, 20, 10)), (0.0, 0.0, 1.0));
+    // Soft edges on request keep the partial ink.
+    s.execute("channel.uvInk", json!({"hardEdges": false})).unwrap();
+    let v = chan(&s, 0, 7, 10);
+    assert!(v > 0.0 && v < 0.5, "{v}");
+    assert!(s.execute("channel.uvInk", json!({"hardEdges": "yes"})).is_err());
+}
+
+#[test]
+fn uv_ink_saves_to_tiff_as_black_ink_on_white() {
+    let mut s = session();
+    rect(&mut s, 10, 5, 20, 10, "replace");
+    s.execute("channel.uvInk", json!({})).unwrap();
+    let r = photocraft_io::export(doc(&s), "w1.tif", &photocraft_io::ExportOptions::default()).unwrap();
+    let img = photocraft_codecs::decode(&r.bytes).unwrap();
+    let w1 = &img.meta.extra_samples.first().expect("the W1 plane").data;
+    assert_eq!(w1.len(), 40 * 20);
+    let at = |x: usize, y: usize| w1[y * 40 + x];
+    // MainTop reads black (0) as full ink and white (255) as none.
+    assert_eq!((at(10, 5), at(29, 14), at(20, 10)), (0, 0, 0), "ink under the selection");
+    assert!(
+        w1.iter().enumerate().filter(|(i, _)| !((10..30).contains(&(i % 40)) && (5..15).contains(&(i / 40)))).all(|(_, v)| *v == 255),
+        "no ink anywhere else"
+    );
+}
+
+#[test]
 fn uv_ink_varnish_presets_get_a_visible_ink_and_each_name_its_own_channel() {
     let mut s = session();
     rect(&mut s, 0, 0, 10, 10, "replace");
