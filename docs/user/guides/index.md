@@ -10,5 +10,6 @@ verified: 0.8.2
 - [Select part of an image and mask it](select-and-mask.md)
 - [Add and style text](add-and-style-text.md)
 - [Export an image](export-an-image.md)
+- [Let Claude prepare UV print files (Windows)](claude-uv-print.md)
 
 Menu paths are written like **File › Open…**. Where a shortcut is shown, `Cmd` is the Ctrl key on Windows and Linux.

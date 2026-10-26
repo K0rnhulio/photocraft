@@ -194,7 +194,7 @@ fn parse_resample(s: &str) -> Method {
 const MAX_RESAMPLE_BYTES: u64 = if cfg!(target_pointer_width = "64") { 8 << 30 } else { 2 << 30 };
 
 /// Image → Image Size.
-fn image_size(s: &mut Session, p: &Value) -> Result<Value> {
+pub(crate) fn image_size(s: &mut Session, p: &Value) -> Result<Value> {
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let (ow, oh) = (d.doc.size.width, d.doc.size.height);
     let resample = parse_resample(p.get("resample").and_then(Value::as_str).unwrap_or("bicubic"));
@@ -333,7 +333,7 @@ fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
 
 /// The flattened document, or an error when the canvas is over the compositor's render cap
 /// ([`photocraft_compose::MAX_RENDER_PIXELS`]; `flatten` returns an empty buffer then).
-fn flatten_whole(doc: &Document, cmd: &str) -> Result<photocraft_compose::Buffer> {
+pub(crate) fn flatten_whole(doc: &Document, cmd: &str) -> Result<photocraft_compose::Buffer> {
     let buf = photocraft_compose::flatten(doc);
     let (w, h) = (doc.size.width, doc.size.height);
     if buf.px.len() as u64 != u64::from(w) * u64::from(h) {
@@ -398,7 +398,7 @@ fn delete_cropped_pixels(layers: &mut [Layer], r: Rect) {
 /// Crops the document to `r` (in current document coordinates).
 /// A frame that extends past the canvas fills the Background's new area with `extension` (the
 /// background colour, as Photoshop's Crop tool does); other layers get transparent pixels there.
-fn crop_doc(doc: &mut Document, cmd: &str, r: Rect, delete_pixels: bool, extension: [f32; 4]) -> Result<()> {
+pub(crate) fn crop_doc(doc: &mut Document, cmd: &str, r: Rect, delete_pixels: bool, extension: [f32; 4]) -> Result<()> {
     // The origin moves to (0, 0); `-i32::MIN` has no i32 value (#959).
     let (Some(dx), Some(dy)) = (r.x0.checked_neg(), r.y0.checked_neg()) else {
         return Err(bad(cmd, format!("the crop origin ({}, {}) can't be moved to (0, 0) within the 32-bit coordinate range", r.x0, r.y0)));
@@ -509,7 +509,7 @@ fn extension_color(s: &Session, p: &Value) -> [f32; 4] {
 }
 
 /// Image → Canvas Size.
-fn canvas_size(s: &mut Session, p: &Value) -> Result<Value> {
+pub(crate) fn canvas_size(s: &mut Session, p: &Value) -> Result<Value> {
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let (ow, oh) = (d.doc.size.width as f64, d.doc.size.height as f64);
     let relative = p.get("relative").and_then(Value::as_bool).unwrap_or(false);
