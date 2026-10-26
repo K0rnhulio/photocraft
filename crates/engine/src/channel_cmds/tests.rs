@@ -546,6 +546,97 @@ fn channel_options_and_spot_channels() {
 }
 
 #[test]
+fn uv_ink_from_the_selection_with_a_choke_and_rerun_updates_it() {
+    for depth in [8, 16, 32] {
+        let mut s = session_depth(depth);
+        rect(&mut s, 10, 5, 20, 10, "replace");
+        let r = s.execute("channel.uvInk", json!({})).unwrap();
+        assert_eq!(
+            (r["channel"].clone(), r["name"].clone(), r["updated"].clone(), r["source"].clone()),
+            (json!(0), json!("W1"), json!(false), json!("selection"))
+        );
+        let ch = &doc(&s).channels[0];
+        assert_eq!(ch.spot, Some((Color::rgb(1.0, 1.0, 1.0), 0.0)), "a white ink spot channel");
+        assert_eq!(ch.surface.format(), channel_format(doc(&s)));
+        assert_eq!((chan(&s, 0, 10, 5), chan(&s, 0, 29, 14), chan(&s, 0, 9, 5), chan(&s, 0, 30, 14)), (1.0, 1.0, 0.0, 0.0));
+        assert!(s.active().unwrap().channel_view.alpha_shown(0), "shown like a new spot channel");
+
+        // Again with a 2 px choke: the same channel, shrunk, not a second one.
+        let r = s.execute("channel.uvInk", json!({"choke": 2})).unwrap();
+        assert_eq!((r["channel"].clone(), r["updated"].clone()), (json!(0), json!(true)));
+        assert_eq!(doc(&s).channels.len(), 1);
+        assert_eq!((chan(&s, 0, 11, 6), chan(&s, 0, 12, 7), chan(&s, 0, 27, 12), chan(&s, 0, 28, 13)), (0.0, 1.0, 1.0, 0.0));
+        // One undo step each.
+        assert!(s.undo());
+        assert_eq!(chan(&s, 0, 10, 5), 1.0);
+    }
+}
+
+#[test]
+fn uv_ink_from_the_artwork_skips_the_background() {
+    let mut s = session();
+    // On the Background alone there is no artwork to back with white.
+    let e = s.execute("channel.uvInk", json!({})).unwrap_err().to_string();
+    assert!(e.contains("no artwork"), "{e}");
+    s.execute("layer.new.layer", json!({})).unwrap();
+    rect(&mut s, 4, 4, 6, 6, "replace");
+    s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+    s.execute("select.deselect", json!({})).unwrap();
+    let r = s.execute("channel.uvInk", json!({"name": "W1", "color": "#00ffff", "solidity": 50})).unwrap();
+    assert_eq!((r["name"].clone(), r["source"].clone()), (json!("W1"), json!("artwork")));
+    let ch = &doc(&s).channels[0];
+    assert_eq!(ch.name, "W1");
+    assert_eq!(ch.spot, Some((Color::rgb(0.0, 1.0, 1.0), 0.5)));
+    assert_eq!((chan(&s, 0, 4, 4), chan(&s, 0, 9, 9), chan(&s, 0, 3, 4), chan(&s, 0, 10, 9)), (1.0, 1.0, 0.0, 0.0));
+    // "source": "selection" without a selection says what to do.
+    let e = s.execute("channel.uvInk", json!({"source": "selection"})).unwrap_err().to_string();
+    assert!(e.contains("make a selection first"), "{e}");
+    // A choke that swallows everything is refused, not an empty channel.
+    let e = s.execute("channel.uvInk", json!({"choke": 50})).unwrap_err().to_string();
+    assert!(e.contains("after the choke"), "{e}");
+}
+
+#[test]
+fn uv_ink_rejects_bad_params_and_an_alpha_channel_of_that_name() {
+    let mut s = session();
+    rect(&mut s, 0, 0, 10, 10, "replace");
+    for p in [
+        json!({"choke": -1}),
+        json!({"choke": 101}),
+        json!({"choke": "2"}),
+        json!({"name": ""}),
+        json!({"name": 5}),
+        json!({"source": "layer"}),
+        json!({"solidity": 200}),
+    ] {
+        assert!(s.execute("channel.uvInk", p.clone()).is_err(), "{p}");
+    }
+    assert!(doc(&s).channels.is_empty());
+    s.execute("channel.new", json!({"name": "White"})).unwrap();
+    let e = s.execute("channel.uvInk", json!({"name": "white"})).unwrap_err().to_string();
+    assert!(e.contains("not a spot channel"), "{e}");
+    assert_eq!(doc(&s).channels.len(), 1);
+}
+
+#[test]
+fn uv_ink_varnish_presets_get_a_visible_ink_and_each_name_its_own_channel() {
+    let mut s = session();
+    rect(&mut s, 0, 0, 10, 10, "replace");
+    for (name, _) in UV_INKS {
+        s.execute("channel.uvInk", json!({"name": name})).unwrap();
+    }
+    let d = doc(&s);
+    let names: Vec<&str> = d.channels.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["W1", "W2", "W3", "W4"]);
+    let white = Color::rgb(1.0, 1.0, 1.0);
+    assert_eq!(d.channels[1].spot.map(|x| x.0), Some(white));
+    assert_ne!(d.channels[2].spot.map(|x| x.0), Some(white), "varnish shows apart from white");
+    // Lowercase finds the same channel rather than adding a "w3".
+    let r = s.execute("channel.uvInk", json!({"name": "w3"})).unwrap();
+    assert_eq!((r["channel"].clone(), r["updated"].clone()), (json!(2), json!(true)));
+}
+
+#[test]
 fn apply_image_hand_computed() {
     let mut s = session();
     // Target: 50% gray. Source: a second document, red #ff0000 / 50% gray.

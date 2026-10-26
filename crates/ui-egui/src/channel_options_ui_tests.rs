@@ -204,3 +204,49 @@ fn new_spot_body_renders_and_bad_saved_prefs_fall_back() {
     ctx.run_ui(Default::default(), |ui| new_spot_body(ui, &mut f)).textures_delta.clear();
     assert!(owns_new_spot(&f));
 }
+
+#[test]
+fn uv_ink_dialog_makes_the_white_channel_and_remembers_name_and_choke() {
+    let mut app = app();
+    app.run("select.rect", json!({"x": 2, "y": 2, "width": 10, "height": 10})).unwrap();
+    let id = open_underbase(&mut app).unwrap();
+    let f = &app.ui.dialogs.last().unwrap().fields;
+    assert!(owns_underbase(f) && !owns(f) && !owns_new_spot(f));
+    assert_eq!((f["name"].clone(), f["choke"].clone(), f["__fromSelection"].clone()), (json!("W1"), json!(0.0), json!(true)));
+    let d = app.ui.dialog_mut(id).unwrap();
+    d.fields.insert("name".into(), json!("W3"));
+    d.fields.insert("choke".into(), json!(1.0));
+    crate::dialogs::confirm(&mut app, id).unwrap();
+    let ch = app.session.active().unwrap().doc.channels.last().unwrap().clone();
+    assert_eq!(ch.name, "W3");
+    assert!(ch.spot.is_some());
+    // Choked by a pixel: the selection's edge is left without white.
+    let (edge, inside) = (ch.surface.rgba(2, 2)[0], ch.surface.rgba(3, 3)[0]);
+    assert!(edge < 0.01 && inside > 0.99, "{edge} {inside}");
+
+    let f = underbase_fields(&app).unwrap();
+    assert_eq!((f["name"].clone(), f["choke"].clone()), (json!("W3"), json!(1.0)));
+}
+
+#[test]
+fn uv_ink_menu_routing_body_and_bad_saved_prefs() {
+    let ctx = egui::Context::default();
+    let mut empty = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+    assert!(open_underbase(&mut empty).is_none());
+    assert!(crate::menus::invoke(&mut empty, &ctx, UNDERBASE, json!({})).is_err());
+
+    let mut app = app();
+    app.session.prefs.edit(|p| p.dialogs.insert(UNDERBASE.into(), json!({"name": "  ", "choke": 900})));
+    let r = crate::menus::invoke(&mut app, &ctx, UNDERBASE, json!({})).unwrap();
+    let id = r["dialog"].as_u64().unwrap();
+    let mut f = app.ui.dialog_mut(id).unwrap().fields.clone();
+    assert_eq!((f["name"].clone(), f["choke"].clone()), (json!("W1"), json!(0.0)));
+    crate::theme::install_fonts(&ctx);
+    ctx.run_ui(Default::default(), |ui| underbase_body(ui, &mut f)).textures_delta.clear();
+    app.ui.close_dialog(id);
+    // Explicit params run the engine directly, no dialog.
+    app.run("select.rect", json!({"x": 2, "y": 2, "width": 4, "height": 4})).unwrap();
+    crate::menus::invoke(&mut app, &ctx, UNDERBASE, json!({"name": "Direct"})).unwrap();
+    assert!(app.ui.dialogs.is_empty());
+    assert_eq!(app.session.active().unwrap().doc.channels.last().unwrap().name, "Direct");
+}

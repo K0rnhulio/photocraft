@@ -1234,6 +1234,114 @@ fn new_spot(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({ "channel": i }))
 }
 
+/// The UV ink channels a flatbed UV printer's RIP maps to its extra heads by name. MainTop takes
+/// W1 and W2 as white and W3 and W4 as varnish; each gets its own one-click preset.
+pub const UV_INKS: [(&str, &str); 4] = [("W1", "White"), ("W2", "White"), ("W3", "Varnish"), ("W4", "Varnish")];
+
+/// The UV Ink Channel's name when none is given: the first white.
+pub const UNDERBASE_NAME: &str = "W1";
+
+/// The on-screen ink of a new UV channel: white for white, a pale yellow for varnish so the two
+/// tell apart in the Channels panel (the printer goes by the name, never this colour).
+fn uv_ink_color(name: &str) -> Color {
+    let varnish = UV_INKS.iter().any(|(n, kind)| *kind == "Varnish" && n.eq_ignore_ascii_case(name)) || name.to_ascii_lowercase().contains("varnish");
+    if varnish { Color::rgb(1.0, 0.9, 0.5) } else { Color::rgb(1.0, 1.0, 1.0) }
+}
+
+/// The widest choke a UV Ink Channel takes, in pixels.
+pub const MAX_UNDERBASE_CHOKE: f64 = 100.0;
+
+/// The largest canvas a UV Ink Channel works on: the choke keeps a full-canvas mask and distance
+/// map, so a bigger one is refused rather than aborting on allocation (as Select › Modify does).
+const MAX_UNDERBASE_PIXELS: u64 = 1 << 30;
+
+/// Channels › UV Ink Channel…: a white underbase or varnish spot channel for UV printing in one
+/// step (by default W1, the first white). Its
+/// coverage is the selection, or with no selection everything that isn't transparent in the
+/// visible layers (the Background left out, since it covers the whole canvas). `choke` shrinks it
+/// by that many pixels so white doesn't peek out around the colour. A spot channel already
+/// named `name` is updated in place (keeping its ink), so running it again after an edit
+/// replaces the old white instead of stacking a second channel.
+fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "channel.uvInk";
+    let name = match p.get("name") {
+        None | Some(Value::Null) => UNDERBASE_NAME.to_string(),
+        Some(Value::String(n)) if !n.trim().is_empty() => n.trim().to_string(),
+        Some(_) => return Err(bad(cmd, "`name` must be a non-empty string")),
+    };
+    let source = match p.get("source").map(Value::as_str) {
+        None | Some(Some("auto")) => "auto",
+        Some(Some("selection")) => "selection",
+        Some(Some("artwork")) => "artwork",
+        _ => return Err(bad(cmd, "`source` must be \"auto\", \"selection\" or \"artwork\"")),
+    };
+    let choke = match p.get("choke") {
+        None | Some(Value::Null) => 0.0,
+        Some(v) => v
+            .as_f64()
+            .filter(|c| (0.0..=MAX_UNDERBASE_CHOKE).contains(c))
+            .ok_or_else(|| bad(cmd, format!("`choke` must be a number of pixels in 0..{MAX_UNDERBASE_CHOKE}")))?,
+    };
+    let color = color_value(cmd, p, "color")?;
+    let solidity = match p.get("solidity") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_f64().filter(|v| (0.0..=100.0).contains(v)).ok_or_else(|| bad(cmd, "`solidity` must be a number in 0..100"))? as f32 / 100.0),
+    };
+    let doc = &s.active().ok_or(EngineError::NoDocument)?.doc;
+    let area = doc.bounds();
+    if area.size().area() > MAX_UNDERBASE_PIXELS {
+        return Err(bad(cmd, "the image is too large for a UV ink channel"));
+    }
+    let use_selection = match source {
+        "selection" => {
+            if doc.selection.is_none() {
+                return Err(bad(cmd, "make a selection first (or use source \"artwork\")"));
+            }
+            true
+        }
+        "artwork" => false,
+        _ => doc.selection.is_some(),
+    };
+    let mut mask = if use_selection {
+        sel::mask_from_surface(doc.selection.as_ref(), area)
+    } else {
+        // The artwork's own shape: the merged alpha of the visible layers without the Background.
+        let mut art = Document::clone(doc);
+        if let Some(bg) = art.background_mut() {
+            bg.visible = false;
+        }
+        photocraft_compose::render(&art, area).px.iter().map(|p| p[3].clamp(0.0, 1.0)).collect()
+    };
+    if choke > 0.0 {
+        mask = sel::contract(&mask, area.width() as usize, area.height() as usize, choke as f32);
+    }
+    if mask.iter().all(|v| *v <= 0.0) {
+        let why =
+            if use_selection { "the selection leaves nothing to put ink under" } else { "there is no artwork to put ink under: every layer is transparent" };
+        return Err(bad(cmd, if choke > 0.0 { format!("{why} after the choke") } else { why.to_string() }));
+    }
+    let (i, updated) = s.edit("UV Ink Channel", |doc, _| {
+        let surface = plane_surface(&mask, area, channel_format(doc));
+        if let Some((i, ch)) = doc.channels.iter_mut().enumerate().find(|(_, c)| c.spot.is_some() && c.name.eq_ignore_ascii_case(&name)) {
+            ch.surface = surface;
+            let (ink, sol) = ch.spot.unwrap_or((uv_ink_color(&name), 0.0));
+            ch.spot = Some((color.unwrap_or(ink), solidity.unwrap_or(sol)));
+            return Ok((i, true));
+        }
+        if doc.channels.iter().any(|c| c.name.eq_ignore_ascii_case(&name)) {
+            return Err(bad(cmd, format!("\"{name}\" is an alpha channel, not a spot channel: rename it or pick another name")));
+        }
+        let ink = (color.unwrap_or_else(|| uv_ink_color(&name)), solidity.unwrap_or(0.0));
+        doc.channels.push(AlphaChannel { spot: Some(ink), ..AlphaChannel::new(name.clone(), surface) });
+        Ok((doc.channels.len() - 1, false))
+    })?;
+    if let Some(st) = s.active_mut() {
+        st.channel_view.set_alpha_visible(i, true);
+        touch(st);
+    }
+    Ok(json!({ "channel": i, "name": name, "updated": updated, "source": if use_selection { "selection" } else { "artwork" } }))
+}
+
 fn duplicate_channel(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "channel.duplicate";
     let src = s.active().ok_or(EngineError::NoDocument)?;
@@ -1975,6 +2083,15 @@ pub fn specs() -> Vec<CommandSpec> {
             r##"{"name":str?,"color":"#rrggbb"="#ff0000","solidity":0..100=0,"fromSelection":bool=true}"##,
             has_doc,
             new_spot
+        ),
+        spec!(
+            "channel.uvInk",
+            "UV Ink Channel…",
+            [],
+            None,
+            r##"{"name":str="W1" (MainTop: W1/W2 white, W3/W4 varnish),"source":"auto|selection|artwork"="auto" (auto: the selection, or the non-transparent artwork without one),"choke":0..100=0 (pixels to shrink the ink by),"color":"#rrggbb"?=white, pale yellow for varnish,"solidity":0..100?=0} (creates, or updates in place, a white underbase or varnish spot channel for UV printing)"##,
+            has_doc,
+            uv_ink_channel
         ),
         spec!(
             "channel.duplicate",
