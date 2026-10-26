@@ -58,6 +58,8 @@ pub struct ChannelView {
     pub quick_mask_hidden: bool,
     /// ⌥-click view of the active layer's mask (#196); see [`crate::mask_view_cmds`].
     pub layer_mask: Option<crate::mask_view_cmds::LayerMaskView>,
+    /// UV print preview on a material, with white ink and varnish; see [`crate::print_preview_cmds`].
+    pub print_preview: Option<crate::print_preview_cmds::PrintPreview>,
 }
 
 impl ChannelView {
@@ -90,6 +92,7 @@ impl ChannelView {
             && !(0..doc.channels.len()).any(|i| self.alpha_shown(i))
             && (doc.quick_mask.is_none() || self.quick_mask_hidden)
             && self.shown_layer_mask(doc).is_none()
+            && self.print_preview.is_none()
     }
     /// The layer mask shown on the canvas (#196) and how, if its layer still has a mask.
     pub fn shown_layer_mask<'a>(&self, doc: &'a Document) -> Option<(&'a photocraft_doc::LayerMask, crate::mask_view_cmds::MaskViewMode)> {
@@ -2011,6 +2014,7 @@ pub fn channels_json(st: &DocState) -> Value {
         "target": v.target,
         "compositeVisible": v.visible_colors(colors) == colors,
         "layerMaskView": crate::mask_view_cmds::view_json(st),
+        "printPreview": crate::print_preview_cmds::view_json(v.print_preview),
     })
 }
 

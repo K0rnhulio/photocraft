@@ -8,6 +8,7 @@
 use egui::{Align2, Color32, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use photocraft_doc::ColorIndicates;
 use photocraft_engine::channel_cmds::{self, ChannelTarget};
+use photocraft_engine::print_preview_cmds::{self, PrintPreview, Substrate};
 use serde_json::{Value, json};
 
 use crate::theme::{self, Tokens};
@@ -86,6 +87,9 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
     let shown_colors = if colors > 1 { colors } else { 0 };
     let mut actions: Vec<(String, Value)> = Vec::new();
+    if let Some(pp) = view.print_preview {
+        print_preview_bar(ui, &mut actions, pp);
+    }
     // The buttons sit in a footer at the panel's bottom, like Photoshop's.
     let footer = widgets::footer_height(ui) + ui.spacing().item_spacing.y;
     let fill = ui.available_height() > footer + 60.0;
@@ -366,6 +370,10 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             ChannelTarget::LayerMask => json!("mask"),
             ChannelTarget::VectorMask => json!("vectorMask"),
         };
+        let preview = icons::button(ui, "layers", 26.0, view.print_preview.is_some(), tl!("Print preview: white ink and varnish on the material"));
+        if preview.clicked() {
+            actions.push((print_preview_cmds::ID.into(), json!({})));
+        }
         let trash = icons::button(ui, "trash", 26.0, false, tl!("Delete current channel"));
         if trash.clicked() {
             actions.push(("channel.delete".into(), json!({})));
@@ -420,6 +428,48 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         app.ui.mask_target = on;
         app.sync_mask_targets();
     }
+}
+
+/// The print preview's settings, above the rows while it is on: the material printed on, and
+/// which inks show (white W1/W2, the colour image, varnish W3/W4).
+fn print_preview_bar(ui: &mut egui::Ui, actions: &mut Vec<(String, Value)>, pp: PrintPreview) {
+    let set = |actions: &mut Vec<(String, Value)>, p: Value| actions.push((print_preview_cmds::ID.into(), p));
+    ui.horizontal_wrapped(|ui| {
+        ui.label(tl!("Print on"));
+        let name = match pp.substrate {
+            Substrate::White => tl!("White material"),
+            Substrate::Black => tl!("Black material"),
+            Substrate::Clear => tl!("Clear material"),
+            Substrate::Color(_) => tl!("Coloured material"),
+        };
+        egui::ComboBox::from_id_salt("print-preview-substrate").selected_text(name).show_ui(ui, |ui| {
+            for (label, value) in [("White material", "white"), ("Black material", "black"), ("Clear material", "clear")] {
+                if ui.selectable_label(name == tl!(label), tl!(label)).clicked() {
+                    set(actions, json!({ "substrate": value }));
+                }
+            }
+            if ui.selectable_label(matches!(pp.substrate, Substrate::Color(_)), tl!("Coloured material")).clicked() {
+                set(actions, json!({ "substrate": [0.55, 0.42, 0.3] }));
+            }
+        });
+        if let Substrate::Color(c) = pp.substrate {
+            let mut rgb = c;
+            if ui.color_edit_button_rgb(&mut rgb).changed() {
+                set(actions, json!({ "substrate": rgb }));
+            }
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        for (label, key, on) in [("White ink", "white", pp.white), ("Colour", "color", pp.color), ("Varnish", "varnish", pp.varnish)] {
+            let mut v = on;
+            if ui.checkbox(&mut v, tl!(label)).changed() {
+                let mut p = serde_json::Map::new();
+                p.insert(key.into(), v.into());
+                set(actions, Value::Object(p));
+            }
+        }
+    });
+    ui.separator();
 }
 
 /// The footer buttons a row can be dropped on.
