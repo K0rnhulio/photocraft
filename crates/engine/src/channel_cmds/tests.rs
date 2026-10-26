@@ -655,6 +655,36 @@ fn uv_ink_saves_to_tiff_as_black_ink_on_white() {
 }
 
 #[test]
+fn spot_channels_paint_like_photoshop_black_lays_ink_and_gray_partial_ink() {
+    let mut s = session();
+    rect(&mut s, 0, 0, 1, 1, "replace");
+    s.execute("channel.uvInk", json!({})).unwrap();
+    s.execute("select.deselect", json!({})).unwrap();
+    let w1 = json!({"channel": 0});
+    // Fill black lays full ink, a 25 % gray 75 % ink, white takes it away.
+    rect(&mut s, 10, 0, 5, 5, "replace");
+    s.execute("edit.fill", json!({"contents": "black", "target": w1})).unwrap();
+    rect(&mut s, 20, 0, 5, 5, "replace");
+    s.execute("edit.fill", json!({"contents": "color", "color": "#bfbfbf", "target": w1})).unwrap();
+    rect(&mut s, 0, 0, 1, 1, "replace");
+    s.execute("edit.fill", json!({"contents": "white", "target": w1})).unwrap();
+    s.execute("select.deselect", json!({})).unwrap();
+    assert_eq!((chan(&s, 0, 12, 2), chan(&s, 0, 0, 0), chan(&s, 0, 30, 10)), (1.0, 0.0, 0.0));
+    assert!((chan(&s, 0, 22, 2) - 0.25).abs() < 0.01, "{}", chan(&s, 0, 22, 2));
+    // A black brush at 50 % opacity: half ink.
+    s.execute("paint.pencil", json!({"points": [[35, 15], [35, 15]], "size": 3, "color": "#000000", "opacity": 0.5, "target": w1})).unwrap();
+    let v = chan(&s, 0, 35, 15);
+    assert!((v - 0.5).abs() < 0.02, "{v}");
+    // A bucket with black floods the empty area with ink.
+    s.execute("paint.bucket", json!({"x": 5, "y": 15, "color": "#000000", "tolerance": 0, "antiAlias": false, "target": w1})).unwrap();
+    assert_eq!(chan(&s, 0, 5, 15), 1.0);
+    // An alpha channel keeps painting as before: white is selected.
+    s.execute("channel.new", json!({})).unwrap();
+    s.execute("edit.fill", json!({"contents": "white", "target": {"channel": 1}})).unwrap();
+    assert_eq!(chan(&s, 1, 5, 5), 1.0);
+}
+
+#[test]
 fn uv_ink_varnish_presets_get_a_visible_ink_and_each_name_its_own_channel() {
     let mut s = session();
     rect(&mut s, 0, 0, 10, 10, "replace");

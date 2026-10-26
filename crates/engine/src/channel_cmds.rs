@@ -637,6 +637,20 @@ pub(crate) fn target_of(p: &Value) -> Target {
     }
 }
 
+/// Whether `p` targets a spot channel of `doc`.
+pub(crate) fn targets_spot(doc: &Document, p: &Value) -> bool {
+    matches!(target_of(p), Target::Alpha(i) if doc.channels.get(i).is_some_and(|c| c.spot.is_some()))
+}
+
+/// The colour a paint tool lays down on target `p`. A spot channel stores ink as white (the TIFF
+/// and PSD writers turn it into Photoshop's 0 = solid ink), but is painted the way Photoshop and
+/// a RIP read it: black lays full ink, a gray partial ink, white none. So the colour's tone is
+/// inverted for a spot target; Normal blending at any opacity gives the same ink either way, since
+/// `1 − (old·(1−a) + c·a) = (1−old)·(1−a) + (1−c)·a`. Other targets get `c` unchanged.
+pub(crate) fn ink_paint_color(doc: &Document, p: &Value, c: [f32; 4]) -> [f32; 4] {
+    if targets_spot(doc, p) { [1.0 - c[0], 1.0 - c[1], 1.0 - c[2], c[3]] } else { c }
+}
+
 /// The target is an alpha channel or the Quick Mask (no layer involved).
 pub(crate) fn is_channel_target(p: &Value) -> bool {
     matches!(target_of(p), Target::Alpha(_) | Target::QuickMask)
@@ -946,8 +960,10 @@ pub(crate) fn clear_channel(doc: &mut Document, target: &Value, background: [f32
     if area.is_empty() {
         return Ok(());
     }
+    // On a spot channel the background colour (white by default) means no ink.
+    let c = ink_paint_color(doc, target, [background[0], background[1], background[2], 1.0]);
     let (surf, _) = target_surface(doc, None, target)?;
-    crate::fill_cmds::fill_color(surf, area, [background[0], background[1], background[2], 1.0], sel.as_ref())
+    crate::fill_cmds::fill_color(surf, area, c, sel.as_ref())
 }
 
 /// The active document targets an alpha channel or is in Quick Mask mode, so pixel commands
