@@ -251,6 +251,93 @@ pub fn new_spot_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     });
 }
 
+// ---------------------------------------------------------------------------------------------
+// UV Ink Channel…: a white underbase or varnish channel for UV printing in one step. Name (what
+// the printer's RIP calls the ink: W1/W2 white, W3/W4 varnish in MainTop, one click each) and
+// Choke (pixels to pull the ink in from the edge). OK runs `channel.uvInk` from the selection, or
+// from the artwork when nothing is selected, and remembers both for next time.
+
+pub const UNDERBASE: &str = "channel.uvInk";
+const UNDERBASE_MARK: &str = "__uvInk";
+
+pub fn owns_underbase(fields: &Map<String, Value>) -> bool {
+    fields.contains_key(UNDERBASE_MARK)
+}
+
+/// The UV Ink Channel fields: the last name and choke (W1 and 0 px at first), or `None`
+/// without a document.
+pub fn underbase_fields(app: &PhotocraftApp) -> Option<Map<String, Value>> {
+    let doc = &app.session.active()?.doc;
+    let saved = app.session.prefs().dialogs.get(UNDERBASE).cloned().unwrap_or_default();
+    let name = saved.get("name").and_then(Value::as_str).filter(|n| !n.trim().is_empty()).unwrap_or(photocraft_engine::channel_cmds::UNDERBASE_NAME);
+    let max = photocraft_engine::channel_cmds::MAX_UNDERBASE_CHOKE;
+    let choke = saved.get("choke").and_then(Value::as_f64).filter(|v| (0.0..=max).contains(v)).unwrap_or(0.0);
+    let mut f = Map::new();
+    f.insert(UNDERBASE_MARK.into(), json!(true));
+    f.insert("__command".into(), json!(UNDERBASE));
+    f.insert("__label".into(), json!("UV Ink Channel…"));
+    f.insert("__fromSelection".into(), json!(doc.selection.is_some()));
+    f.insert("name".into(), json!(name));
+    f.insert("choke".into(), json!(choke));
+    Some(f)
+}
+
+/// Opens UV Ink Channel, or `None` without a document.
+pub fn open_underbase(app: &mut PhotocraftApp) -> Option<u64> {
+    let f = underbase_fields(app)?;
+    Some(app.ui.open_dialog(crate::state::DialogKind::Command, f))
+}
+
+pub fn confirm_underbase(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value, String> {
+    let mut p = Map::new();
+    for key in ["name", "choke"] {
+        if let Some(v) = f.get(key) {
+            p.insert(key.into(), v.clone());
+        }
+    }
+    let result = app.run(UNDERBASE, Value::Object(p.clone()));
+    if result.is_ok() {
+        app.session.prefs.edit(|prefs| prefs.dialogs.insert(UNDERBASE.into(), Value::Object(p)));
+    }
+    result
+}
+
+pub fn underbase_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+    ui.spacing_mut().item_spacing.y = 6.0;
+    let mut name = f.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+    ui.horizontal(|ui| {
+        label(ui, tl!("Name:"));
+        if ui.add(egui::TextEdit::singleline(&mut name).desired_width(200.0)).accessible_name(tl!("Name")).changed() {
+            f.insert("name".into(), json!(name));
+        }
+    });
+    ui.horizontal(|ui| {
+        label(ui, "");
+        for (preset, kind) in photocraft_engine::channel_cmds::UV_INKS {
+            let on = name.eq_ignore_ascii_case(preset);
+            if ui.selectable_label(on, preset).on_hover_text(tl!(kind)).clicked() {
+                f.insert("name".into(), json!(preset));
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        label(ui, tl!("Choke:"));
+        let max = photocraft_engine::channel_cmds::MAX_UNDERBASE_CHOKE as f32;
+        let mut px = f.get("choke").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        if crate::widgets::value_field(ui, &mut px, 0.0..=max, "px", 64.0).accessible_name(tl!("Choke:")).changed() {
+            f.insert("choke".into(), json!(px.round()));
+        }
+    });
+    let from = if f.get("__fromSelection").and_then(Value::as_bool).unwrap_or(false) {
+        tl!("The ink goes where the selection is.")
+    } else {
+        tl!("Nothing is selected: the ink goes under everything that isn't transparent.")
+    };
+    let t = Tokens::get(ui.ctx());
+    ui.label(egui::RichText::new(from).size(11.0).color(t.text_dim));
+    ui.label(egui::RichText::new(tl!("Running it again updates the channel with this name.")).size(11.0).color(t.text_dim));
+}
+
 #[cfg(test)]
 #[path = "channel_options_ui_tests.rs"]
 mod tests;

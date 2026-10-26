@@ -317,6 +317,14 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     ui.separator();
                     item(ui, a, "New Channel…", "channel.new", json!({}));
                     item(ui, a, "New Spot Channel…", "ui.newSpotChannel", json!({}));
+                    item(ui, a, "UV Ink Channel…", "ui.uvInk", json!({}));
+                    // One click each: the selection (or the artwork) into MainTop's white and
+                    // varnish channels, updating the one already there.
+                    ui.menu_button(tl!("UV Ink from Selection"), |ui| {
+                        for (name, kind) in photocraft_engine::channel_cmds::UV_INKS {
+                            item(ui, a, &format!("{name} {}", tl!(kind)), "channel.uvInk", json!({ "name": name }));
+                        }
+                    });
                     ui.separator();
                     item(ui, a, "Split Channels", "channel.split", json!({}));
                     item(ui, a, "Merge Channels…", "channel.merge", json!({}));
@@ -396,6 +404,10 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         }
         if id == "ui.newSpotChannel" {
             crate::channel_options_ui::open_new_spot(app);
+            continue;
+        }
+        if id == "ui.uvInk" {
+            crate::channel_options_ui::open_underbase(app);
             continue;
         }
         if id == "ui.channelOptions" {
