@@ -292,6 +292,9 @@ pub struct FormatChoices {
     pub tga_bits: Option<photocraft_io::TgaBits>,
     pub dds: Option<photocraft_io::DdsOptions>,
     pub jpeg: Option<jpeg_options_ui::JpegChoice>,
+    /// TIFF Options' channel choices (`"tiffAlphaChannels"`, `"tiffSpotColors"`,
+    /// `"tiffSaveTransparency"`).
+    pub tiff: Option<photocraft_io::TiffChannels>,
 }
 
 impl FormatChoices {
@@ -301,6 +304,7 @@ impl FormatChoices {
             tga_bits: targa_options_ui::bits_param(params, cmd)?,
             dds: dds_options_ui::options_param(params, cmd)?,
             jpeg: jpeg_options_ui::choice_param(params, cmd)?,
+            tiff: tiff_options_ui::channels_param(params, cmd)?,
         })
     }
 
@@ -311,12 +315,18 @@ impl FormatChoices {
             tga_bits: targa_options_ui::bits_param(params, cmd)?,
             dds: dds_options_ui::options_param(params, cmd)?,
             jpeg: jpeg_options_ui::recorded_choice(params, cmd)?,
+            tiff: tiff_options_ui::channels_param(params, cmd)?,
         })
     }
 
     /// The export settings with these answers applied.
     pub fn apply(self, settings: ExportSettings) -> ExportSettings {
-        let settings = ExportSettings { tga_bits: self.tga_bits.or(settings.tga_bits), dds: self.dds.unwrap_or(settings.dds), ..settings };
+        let settings = ExportSettings {
+            tga_bits: self.tga_bits.or(settings.tga_bits),
+            dds: self.dds.unwrap_or(settings.dds),
+            tiff_channels: self.tiff.unwrap_or(settings.tiff_channels),
+            ..settings
+        };
         match self.jpeg {
             Some(j) => j.apply(settings),
             None => settings,
@@ -333,6 +343,9 @@ impl FormatChoices {
         }
         if let Some(j) = self.jpeg {
             j.record(step);
+        }
+        if let Some(t) = self.tiff {
+            tiff_options_ui::record(t, step);
         }
     }
 }
@@ -352,6 +365,8 @@ pub struct ExportSettings {
     pub webp_quality: Option<u8>,
     /// TIFF: keep the layers (Photoshop layer data); `false` is "Discard Layers and Save a Copy".
     pub tiff_layers: bool,
+    /// TIFF: which alpha and spot channels are kept, and Save Transparency (TIFF Options).
+    pub tiff_channels: photocraft_io::TiffChannels,
     /// Embed the document's whole XMP packet. `true` by default (Save As keeps the metadata);
     /// Export As starts at Metadata: None, since the packet can carry the text of every type
     /// layer and one id per placed document (#647).
@@ -392,6 +407,7 @@ impl Default for ExportSettings {
             webp_lossless: true,
             webp_quality: None,
             tiff_layers: true,
+            tiff_channels: photocraft_io::TiffChannels::default(),
             xmp_all: true,
             tga_bits: None,
             dds: photocraft_io::DdsOptions::default(),
@@ -422,6 +438,7 @@ impl ExportSettings {
         opts.encode.embed_icc = self.embed_icc;
         opts.encode.embed_metadata = self.embed_metadata;
         opts.tiff_layers = self.tiff_layers;
+        opts.tiff_channels = self.tiff_channels;
         opts.xmp = if self.xmp_all { photocraft_io::XmpEmbed::All } else { photocraft_io::XmpEmbed::None };
         opts.tga_bits = self.tga_bits;
         opts.encode.dds = self.dds;
@@ -1855,7 +1872,7 @@ impl PhotocraftApp {
         }
         // A layered TIFF asks about its layers first (Preferences › File Handling); the save
         // continues from the prompt, which records the step once answered.
-        if tiff_options_ui::wants_prompt(self, &path) {
+        if tiff_options_ui::wants_prompt(self, &path, choices.tiff.is_some()) {
             tiff_options_ui::park(self, path.clone())?;
             return Ok(serde_json::json!({"path": path, "warnings": []}));
         }
@@ -1911,7 +1928,20 @@ impl PhotocraftApp {
             && last.0 == "file.saveAs"
             && last.1.get("path").and_then(Value::as_str) == Some(path)
             && let Some(step) = last.1.as_object()
-            && step.keys().all(|k| matches!(k.as_str(), "path" | "tgaBits" | "ddsCompression" | "ddsMipmaps" | "quality" | "jpegFormat"))
+            && step.keys().all(|k| {
+                matches!(
+                    k.as_str(),
+                    "path"
+                        | "tgaBits"
+                        | "ddsCompression"
+                        | "ddsMipmaps"
+                        | "quality"
+                        | "jpegFormat"
+                        | "tiffAlphaChannels"
+                        | "tiffSpotColors"
+                        | "tiffSaveTransparency"
+                )
+            })
         {
             let mut step = step.clone();
             step.remove("path");
@@ -1999,7 +2029,10 @@ impl PhotocraftApp {
     /// (`None`: 32 with an alpha channel or transparency, else 24), the DDS options and the JPEG
     /// Options.
     fn write_save(&mut self, path: String, tiff_layers: Option<bool>, choices: FormatChoices) -> Result<Value, String> {
-        let copy = self.saves_copy(&path, tiff_layers)?;
+        // Leaving channels out writes a copy, as Photoshop's Save As does when Alpha Channels or
+        // Spot Colors is unticked: the document still has them.
+        let drops = choices.tiff.is_some_and(|t| self.session.active().is_some_and(|st| tiff_options_ui::drops_channels(&st.doc, t)));
+        let copy = drops || self.saves_copy(&path, tiff_layers)?;
         let settings = choices.apply(ExportSettings { tiff_layers: tiff_layers.unwrap_or(ExportSettings::default().tiff_layers), ..self.save_settings() });
         match self.write_document(path.clone(), &settings, copy)? {
             Some((path, warnings)) => Ok(serde_json::json!({"path": path, "warnings": warnings})),

@@ -52,7 +52,7 @@ id = "FILE-215-7"
 target = "Layered TIFF read and write (tag 37724), honouring the ask-before-saving pref"
 status = "done"
 issue = 215
-note = "psd tiff.rs (ImageSourceData, both byte orders), io tiff_layers.rs, ui tiff_options_ui.rs (Discard Layers and Save a Copy); extra alpha/spot channels and a Quick Mask are written as TIFF extra samples (at most 16) plus Photoshop resources for name, colour and solidity; Photoshop's MTrn marker is read (#7415). The TIFF Options Save Transparency choice isn't offered: channels are written as Photoshop does with it off"
+note = "psd tiff.rs (ImageSourceData, both byte orders), io tiff_layers.rs, ui tiff_options_ui.rs (Discard Layers and Save a Copy); extra alpha/spot channels and a Quick Mask are written as TIFF extra samples (at most 16) plus Photoshop resources for name, colour and solidity; Photoshop's MTrn marker is read (#7415). TIFF Options choose Spot Colors, Alpha Channels and Save Transparency (transparency written first, with MTrn in a layered TIFF, as Photoshop writes it); tiffSpotColors, tiffAlphaChannels, tiffSaveTransparency on the save commands"
 
 [[item]]
 id = "FILE-215-8"

@@ -1874,6 +1874,38 @@ fn save_a_copy_writes_the_tiff_compression_asked_for() {
     }
 }
 
+/// TIFF Options' channel choices: `tiffSpotColors` / `tiffAlphaChannels` false leave those
+/// channels out of the file, `tiffSaveTransparency` keeps the transparency next to them. A value
+/// that isn't a bool is refused before anything is written.
+#[test]
+fn save_a_copy_writes_the_tiff_channels_asked_for() {
+    let dir = tmp("tiff-channels");
+    let mut s = session(8, 6, 8);
+    s.execute("channel.newSpot", json!({"name": "Gold", "color": "#d4af37"})).unwrap();
+    s.execute("channel.new", json!({"name": "Mask"})).unwrap();
+    let names = |bytes: &[u8]| -> Vec<String> { photocraft_io::import("a.tif", bytes).unwrap().document.channels.iter().map(|c| c.name.clone()).collect() };
+    for (params, want) in [
+        (json!({}), vec!["Gold", "Mask"]),
+        (json!({"tiffSpotColors": false}), vec!["Mask"]),
+        (json!({"tiffAlphaChannels": false}), vec!["Gold"]),
+        (json!({"tiffAlphaChannels": false, "tiffSpotColors": false}), vec![]),
+        (json!({"tiffSaveTransparency": true, "tiffSpotColors": null}), vec!["Gold", "Mask"]),
+    ] {
+        let out = join(&dir, "a.tif");
+        let mut p = params.clone();
+        p["path"] = json!(out);
+        let r = s.execute("file.saveACopy", p).unwrap();
+        assert_eq!(names(&std::fs::read(&out).unwrap()), want, "{params}: {r}");
+    }
+    for bad in [json!("no"), json!(0)] {
+        let out = join(&dir, "bad.tif");
+        let r = s.execute("file.saveACopy", json!({"path": out, "tiffSpotColors": bad}));
+        assert!(matches!(r, Err(EngineError::BadParams { .. })), "{bad}: {r:?}");
+        assert!(!std::path::Path::new(&out).exists(), "{bad}: nothing written");
+    }
+    assert_eq!(tiff_channels_param(&json!({}), "x").unwrap(), None);
+}
+
 #[test]
 fn sanitize_keeps_windows_device_names_off_the_disk() {
     assert_eq!(sanitize("nul"), "nul_");
