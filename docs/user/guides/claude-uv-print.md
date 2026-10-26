@@ -56,9 +56,17 @@ Integrations › Allow Agent Control must stay on (it is by default).
 
 Then tell Claude where to connect.
 
-**Claude Desktop:** open Settings › Developer › Edit Config. That opens
-`%APPDATA%\Claude\claude_desktop_config.json`. Put this in it (replace `YOURNAME` with your
-Windows user name; every `\` is written twice in this file), save, and quit and reopen Claude:
+**Claude Desktop:** open Settings › Developer › Edit Config. That opens the folder holding
+`claude_desktop_config.json`. Where it is depends on how Claude was installed:
+
+| Claude installed from | Settings file |
+|---|---|
+| claude.ai download | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Microsoft Store | `%LOCALAPPDATA%\Claude-Data\claude_<letters>\claude_desktop_config.json` (the folder Edit Config opens) |
+
+Always use the folder Edit Config opens; a file anywhere else is ignored. Put this in the file
+(replace `YOURNAME` with your Windows user name; every `\` is written twice in this file), save,
+then quit Claude from its icon next to the clock (closing the window is not enough) and reopen it:
 
 ```json
 {
@@ -128,10 +136,15 @@ must fit inside, all in millimetres.
 
 ## When something doesn't work
 
-- **Claude doesn't list photocraft:** the path in `command` is wrong or Claude wasn't fully
-  restarted. In PowerShell, run the same path with `mcp --help`; it should print help.
-- **"connection refused" in live mode:** PhotoCraft isn't running, or wasn't started with the
-  `.bat` file (a normal start doesn't open the control port).
+- **Claude doesn't list photocraft under Settings › Developer:** the config is in the wrong
+  folder (see the table above: the Microsoft Store version doesn't read `%APPDATA%\Claude`), the
+  path in `command` is wrong, or Claude wasn't fully quit. In PowerShell, run the same path with
+  `mcp --help`; it should print help.
+- **photocraft is Running but Claude says it can't connect:** PhotoCraft isn't running, or was
+  started from the Start menu or a shortcut instead of the `.bat` file, which is the only start
+  that opens port 7878. Save your work, close every PhotoCraft window and start it with the `.bat`
+  file. `Test-NetConnection 127.0.0.1 -Port 7878 -InformationLevel Quiet` prints `True` once it
+  listens.
 - **"automation filesystem access is not granted" or a path is refused:** the file isn't inside
   `C:\PhotoCraftJobs` (or the folder you named in both places).
 - In live mode, `doc_save` takes only `path`; options such as `tiffLayers` need background mode.
