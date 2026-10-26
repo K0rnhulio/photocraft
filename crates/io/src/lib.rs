@@ -78,7 +78,7 @@ mod xcf;
 
 use photocraft_codecs::{CodecError, EncodeOptions};
 pub use photocraft_codecs::{DdsCompression, DdsOptions, DpxBits};
-use photocraft_doc::{Adjustment, Document, Layer, LayerContent};
+use photocraft_doc::{Adjustment, AlphaChannel, Document, Layer, LayerContent};
 use photocraft_psd::{PsdError, PsdFile};
 
 pub use adjust_map::ADJUSTMENT_KEYS;
@@ -236,6 +236,36 @@ pub struct ExportOptions {
     /// PSD/PSB and layered TIFF: read and embed the files linked smart objects name (see
     /// [`PsdExportOptions::read_linked_files`]). On by default; automation turns it off.
     pub read_linked_files: bool,
+    /// TIFF: which extra channels and transparency the file keeps (TIFF Options).
+    pub tiff_channels: TiffChannels,
+}
+
+/// What a TIFF keeps besides the colour channels: Photoshop's Save As checkboxes Alpha Channels
+/// and Spot Colors, and TIFF Options' Save Transparency. The default keeps every channel and
+/// writes no transparency next to them, as Photoshop's dialog starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TiffChannels {
+    /// Keep the alpha channels (and a Quick Mask) as extra samples.
+    pub alpha_channels: bool,
+    /// Keep the spot colour channels as extra samples.
+    pub spot_colors: bool,
+    /// With extra channels, keep the image's transparency as its own sample (before them) instead
+    /// of compositing the image over white. A TIFF with no extra channels keeps its transparency
+    /// either way.
+    pub save_transparency: bool,
+}
+
+impl Default for TiffChannels {
+    fn default() -> Self {
+        TiffChannels { alpha_channels: true, spot_colors: true, save_transparency: false }
+    }
+}
+
+impl TiffChannels {
+    /// Whether channel `c` of the document goes into the file.
+    pub fn keeps(&self, c: &AlphaChannel) -> bool {
+        if c.spot.is_some() { self.spot_colors } else { self.alpha_channels }
+    }
 }
 
 impl Default for ExportOptions {
@@ -251,6 +281,7 @@ impl Default for ExportOptions {
             document_path: None,
             pcraft_cache: None,
             read_linked_files: true,
+            tiff_channels: TiffChannels::default(),
         }
     }
 }
@@ -579,8 +610,15 @@ fn export_stages(doc: &Document, name_or_ext: &str, opts: &ExportOptions, ctl: &
         return Ok(ExportResult { bytes, warnings });
     }
     let format = photocraft_codecs::from_extension(&ext).ok_or_else(|| IoError::UnknownFormat(name_or_ext.to_string()))?;
-    if format == photocraft_codecs::Format::Tiff && opts.tiff_layers && tiff_layers::would_write_layers(doc) {
-        return tiff_layers::export_layered(doc, opts, ctl);
+    if format == photocraft_codecs::Format::Tiff {
+        let (doc, dropped) = tiff_layers::chosen_channels(doc, opts.tiff_channels);
+        let mut r = if opts.tiff_layers && tiff_layers::would_write_layers(&doc) {
+            tiff_layers::export_layered(&doc, opts, ctl)?
+        } else {
+            flat::export_flat_with(&doc, format, opts, ctl)?
+        };
+        r.warnings.extend(dropped);
+        return Ok(r);
     }
     flat::export_flat_with(doc, format, opts, ctl)
 }

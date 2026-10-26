@@ -159,3 +159,55 @@ fn close_all_waits_for_each_layered_tiff_write() {
     assert!(h.state().session.documents().is_empty());
     assert!(h.state().discard.is_none());
 }
+
+/// A TIFF of a document with a spot channel asks which channels go into the file (a RIP such as a
+/// UV printer's reads them as ink plates). Unticking Spot Colors saves a copy without it, and
+/// the answer is recorded for actions; a save that brings its own answer doesn't ask.
+#[test]
+fn tiff_options_choose_spot_colors_and_transparency() {
+    let _gpu = photocraft_testkit::gpu_lock();
+    let mut app = app_with_docs(1);
+    app.run("channel.newSpot", json!({"name": "White", "color": "#ffffff"})).unwrap();
+    let writes: Writes = Rc::default();
+    let written = writes.clone();
+    app.services.export = Some(Box::new(move |_, _, settings| Ok((serde_json::to_vec(&settings.tiff_channels.spot_colors).unwrap(), Vec::new()))));
+    app.services.write = Some(Box::new(move |path, bytes| {
+        written.borrow_mut().push((path.to_string(), bytes.to_vec()));
+        Ok(())
+    }));
+    let builder = egui_kittest::Harness::builder().with_size(egui::vec2(800.0, 600.0));
+    let builder = if std::env::var_os("PHOTOCRAFT_TIFF_SNAPSHOTS").is_some() { builder.wgpu() } else { builder };
+    let mut h = builder.build_ui_state(
+        |ui, app| {
+            tiff_options_ui::show(app, ui.ctx());
+        },
+        app,
+    );
+    PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+    h.state_mut().save_to("ink.tif".into(), crate::FormatChoices::default()).unwrap();
+    h.run_steps(4);
+    let p = h.state().tiff_options.as_ref().expect("TIFF Options is up");
+    assert_eq!(p.counts, (0, 1));
+    assert!(h.query_by_label("Alpha Channels (0)").is_none(), "no alpha channel to offer");
+    h.get_by_label("Spot Colors (1)").click();
+    h.run_steps(2);
+    h.get_by_label("Save Transparency").click();
+    h.run_steps(2);
+    capture(&mut h, "04-tiff-channels");
+    let p = h.state().tiff_options.as_ref().unwrap();
+    assert_eq!(p.channels, photocraft_io::TiffChannels { alpha_channels: true, spot_colors: false, save_transparency: true });
+    h.key_press(Key::Enter);
+    h.run_steps(3);
+    assert_eq!(writes.borrow().as_slice(), &[("ink.tif".into(), serde_json::to_vec(&false).unwrap())]);
+    let st = h.state().session.active().unwrap();
+    assert_eq!(st.path, None, "a copy: the document still has its spot channel");
+    let (id, step) = h.state().session.journal.last().unwrap().clone();
+    assert_eq!(id, "file.saveAs");
+    assert_eq!((step["tiffSpotColors"].clone(), step["tiffSaveTransparency"].clone()), (json!(false), json!(true)));
+
+    // Played back (or scripted) with its answer: no prompt.
+    let choices = crate::FormatChoices::from_params(&json!({"tiffSpotColors": true}), "file.saveAs").unwrap();
+    h.state_mut().save_to("again.tif".into(), choices).unwrap();
+    assert!(h.state().tiff_options.is_none());
+    assert_eq!(writes.borrow().last().unwrap(), &("again.tif".to_string(), serde_json::to_vec(&true).unwrap()));
+}
