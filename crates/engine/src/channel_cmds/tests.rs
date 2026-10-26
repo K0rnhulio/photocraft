@@ -619,6 +619,72 @@ fn uv_ink_rejects_bad_params_and_an_alpha_channel_of_that_name() {
 }
 
 #[test]
+fn uv_ink_hard_edges_leave_no_faint_ink_outside_a_soft_selection() {
+    let mut s = session();
+    rect(&mut s, 10, 5, 20, 10, "replace");
+    s.execute("select.modify.feather", json!({"radius": 4})).unwrap();
+    // A feathered selection reaches past the rectangle with low values.
+    assert!(sel_at(&s, 7, 10) > 0.0 && sel_at(&s, 7, 10) < 0.5);
+    s.execute("channel.uvInk", json!({})).unwrap();
+    let all: Vec<f32> = (0..20).flat_map(|y| (0..40).map(move |x| (x, y))).map(|(x, y)| chan(&s, 0, x, y)).collect();
+    assert!(all.iter().all(|v| *v == 0.0 || *v == 1.0), "only full ink or none");
+    assert_eq!((chan(&s, 0, 7, 10), chan(&s, 0, 0, 0), chan(&s, 0, 20, 10)), (0.0, 0.0, 1.0));
+    // Soft edges on request keep the partial ink.
+    s.execute("channel.uvInk", json!({"hardEdges": false})).unwrap();
+    let v = chan(&s, 0, 7, 10);
+    assert!(v > 0.0 && v < 0.5, "{v}");
+    assert!(s.execute("channel.uvInk", json!({"hardEdges": "yes"})).is_err());
+}
+
+#[test]
+fn uv_ink_saves_to_tiff_as_black_ink_on_white() {
+    let mut s = session();
+    rect(&mut s, 10, 5, 20, 10, "replace");
+    s.execute("channel.uvInk", json!({})).unwrap();
+    let r = photocraft_io::export(doc(&s), "w1.tif", &photocraft_io::ExportOptions::default()).unwrap();
+    let img = photocraft_codecs::decode(&r.bytes).unwrap();
+    let w1 = &img.meta.extra_samples.first().expect("the W1 plane").data;
+    assert_eq!(w1.len(), 40 * 20);
+    let at = |x: usize, y: usize| w1[y * 40 + x];
+    // MainTop reads black (0) as full ink and white (255) as none.
+    assert_eq!((at(10, 5), at(29, 14), at(20, 10)), (0, 0, 0), "ink under the selection");
+    assert!(
+        w1.iter().enumerate().filter(|(i, _)| !((10..30).contains(&(i % 40)) && (5..15).contains(&(i / 40)))).all(|(_, v)| *v == 255),
+        "no ink anywhere else"
+    );
+}
+
+#[test]
+fn spot_channels_paint_like_photoshop_black_lays_ink_and_gray_partial_ink() {
+    let mut s = session();
+    rect(&mut s, 0, 0, 1, 1, "replace");
+    s.execute("channel.uvInk", json!({})).unwrap();
+    s.execute("select.deselect", json!({})).unwrap();
+    let w1 = json!({"channel": 0});
+    // Fill black lays full ink, a 25 % gray 75 % ink, white takes it away.
+    rect(&mut s, 10, 0, 5, 5, "replace");
+    s.execute("edit.fill", json!({"contents": "black", "target": w1})).unwrap();
+    rect(&mut s, 20, 0, 5, 5, "replace");
+    s.execute("edit.fill", json!({"contents": "color", "color": "#bfbfbf", "target": w1})).unwrap();
+    rect(&mut s, 0, 0, 1, 1, "replace");
+    s.execute("edit.fill", json!({"contents": "white", "target": w1})).unwrap();
+    s.execute("select.deselect", json!({})).unwrap();
+    assert_eq!((chan(&s, 0, 12, 2), chan(&s, 0, 0, 0), chan(&s, 0, 30, 10)), (1.0, 0.0, 0.0));
+    assert!((chan(&s, 0, 22, 2) - 0.25).abs() < 0.01, "{}", chan(&s, 0, 22, 2));
+    // A black brush at 50 % opacity: half ink.
+    s.execute("paint.pencil", json!({"points": [[35, 15], [35, 15]], "size": 3, "color": "#000000", "opacity": 0.5, "target": w1})).unwrap();
+    let v = chan(&s, 0, 35, 15);
+    assert!((v - 0.5).abs() < 0.02, "{v}");
+    // A bucket with black floods the empty area with ink.
+    s.execute("paint.bucket", json!({"x": 5, "y": 15, "color": "#000000", "tolerance": 0, "antiAlias": false, "target": w1})).unwrap();
+    assert_eq!(chan(&s, 0, 5, 15), 1.0);
+    // An alpha channel keeps painting as before: white is selected.
+    s.execute("channel.new", json!({})).unwrap();
+    s.execute("edit.fill", json!({"contents": "white", "target": {"channel": 1}})).unwrap();
+    assert_eq!(chan(&s, 1, 5, 5), 1.0);
+}
+
+#[test]
 fn uv_ink_varnish_presets_get_a_visible_ink_and_each_name_its_own_channel() {
     let mut s = session();
     rect(&mut s, 0, 0, 10, 10, "replace");

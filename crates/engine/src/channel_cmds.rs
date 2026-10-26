@@ -637,6 +637,20 @@ pub(crate) fn target_of(p: &Value) -> Target {
     }
 }
 
+/// Whether `p` targets a spot channel of `doc`.
+pub(crate) fn targets_spot(doc: &Document, p: &Value) -> bool {
+    matches!(target_of(p), Target::Alpha(i) if doc.channels.get(i).is_some_and(|c| c.spot.is_some()))
+}
+
+/// The colour a paint tool lays down on target `p`. A spot channel stores ink as white (the TIFF
+/// and PSD writers turn it into Photoshop's 0 = solid ink), but is painted the way Photoshop and
+/// a RIP read it: black lays full ink, a gray partial ink, white none. So the colour's tone is
+/// inverted for a spot target; Normal blending at any opacity gives the same ink either way, since
+/// `1 − (old·(1−a) + c·a) = (1−old)·(1−a) + (1−c)·a`. Other targets get `c` unchanged.
+pub(crate) fn ink_paint_color(doc: &Document, p: &Value, c: [f32; 4]) -> [f32; 4] {
+    if targets_spot(doc, p) { [1.0 - c[0], 1.0 - c[1], 1.0 - c[2], c[3]] } else { c }
+}
+
 /// The target is an alpha channel or the Quick Mask (no layer involved).
 pub(crate) fn is_channel_target(p: &Value) -> bool {
     matches!(target_of(p), Target::Alpha(_) | Target::QuickMask)
@@ -946,8 +960,10 @@ pub(crate) fn clear_channel(doc: &mut Document, target: &Value, background: [f32
     if area.is_empty() {
         return Ok(());
     }
+    // On a spot channel the background colour (white by default) means no ink.
+    let c = ink_paint_color(doc, target, [background[0], background[1], background[2], 1.0]);
     let (surf, _) = target_surface(doc, None, target)?;
-    crate::fill_cmds::fill_color(surf, area, [background[0], background[1], background[2], 1.0], sel.as_ref())
+    crate::fill_cmds::fill_color(surf, area, c, sel.as_ref())
 }
 
 /// The active document targets an alpha channel or is in Quick Mask mode, so pixel commands
@@ -1265,6 +1281,11 @@ const MAX_UNDERBASE_PIXELS: u64 = 1 << 30;
 /// by that many pixels so white doesn't peek out around the colour. A spot channel already
 /// named `name` is updated in place (keeping its ink), so running it again after an edit
 /// replaces the old white instead of stacking a second channel.
+///
+/// With `hardEdges` (the default) a pixel gets full ink when it is at least half selected (or
+/// half opaque) and none otherwise. A RIP reads any gray as partial ink, so a feathered or
+/// fuzzy selection (Color Range, a soft brush in Quick Mask) would otherwise lay a faint coat
+/// of white over the whole background.
 fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "channel.uvInk";
     let name = match p.get("name") {
@@ -1284,6 +1305,10 @@ fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
             .as_f64()
             .filter(|c| (0.0..=MAX_UNDERBASE_CHOKE).contains(c))
             .ok_or_else(|| bad(cmd, format!("`choke` must be a number of pixels in 0..{MAX_UNDERBASE_CHOKE}")))?,
+    };
+    let hard = match p.get("hardEdges") {
+        None | Some(Value::Null) => true,
+        Some(v) => v.as_bool().ok_or_else(|| bad(cmd, "`hardEdges` must be true or false"))?,
     };
     let color = color_value(cmd, p, "color")?;
     let solidity = match p.get("solidity") {
@@ -1317,6 +1342,11 @@ fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
     };
     if choke > 0.0 {
         mask = sel::contract(&mask, area.width() as usize, area.height() as usize, choke as f32);
+    }
+    if hard {
+        for v in &mut mask {
+            *v = if *v >= 0.5 { 1.0 } else { 0.0 };
+        }
     }
     if mask.iter().all(|v| *v <= 0.0) {
         let why =
@@ -2093,7 +2123,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "UV Ink Channel…",
             [],
             None,
-            r##"{"name":str="W1" (MainTop: W1/W2 white, W3/W4 varnish),"source":"auto|selection|artwork"="auto" (auto: the selection, or the non-transparent artwork without one),"choke":0..100=0 (pixels to shrink the ink by),"color":"#rrggbb"?=white, pale yellow for varnish,"solidity":0..100?=0} (creates, or updates in place, a white underbase or varnish spot channel for UV printing)"##,
+            r##"{"name":str="W1" (MainTop: W1/W2 white, W3/W4 varnish),"source":"auto|selection|artwork"="auto" (auto: the selection, or the non-transparent artwork without one),"choke":0..100=0 (pixels to shrink the ink by),"hardEdges":bool=true (full ink where at least half selected, none elsewhere; false keeps soft edges as partial ink),"color":"#rrggbb"?=white, pale yellow for varnish,"solidity":0..100?=0} (creates, or updates in place, a white underbase or varnish spot channel for UV printing)"##,
             has_doc,
             uv_ink_channel
         ),

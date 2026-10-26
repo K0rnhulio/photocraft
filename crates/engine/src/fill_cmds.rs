@@ -142,6 +142,13 @@ pub fn fill(s: &mut Session, p: &Value) -> Result<Value> {
     if area.is_empty() {
         return Ok(out);
     }
+    // A spot channel is filled like Photoshop: black lays full ink, a gray partial ink.
+    let source = match source {
+        Source::Color(c) | Source::Cmyk { rgba: c, .. } if crate::channel_cmds::targets_spot(&st.doc, p) => {
+            Source::Color(crate::channel_cmds::ink_paint_color(&st.doc, p, c))
+        }
+        other => other,
+    };
     // The document's own CMYK profile converts the fill colour, like the compositor and brush.
     let cmyk = crate::brush_cmds::doc_cmyk_space(s);
     photocraft_color::convert::with_cmyk_space(cmyk.as_ref(), || {

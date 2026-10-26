@@ -250,3 +250,14 @@ fn uv_ink_menu_routing_body_and_bad_saved_prefs() {
     assert!(app.ui.dialogs.is_empty());
     assert_eq!(app.session.active().unwrap().doc.channels.last().unwrap().name, "Direct");
 }
+
+#[test]
+fn uv_ink_dialog_sends_hard_edges_and_remembers_soft() {
+    let mut app = app();
+    app.run("select.rect", json!({"x": 2, "y": 2, "width": 10, "height": 10})).unwrap();
+    let id = open_underbase(&mut app).unwrap();
+    assert_eq!(app.ui.dialog_mut(id).unwrap().fields["hardEdges"], json!(true));
+    app.ui.dialog_mut(id).unwrap().fields.insert("hardEdges".into(), json!(false));
+    crate::dialogs::confirm(&mut app, id).unwrap();
+    assert_eq!(underbase_fields(&app).unwrap()["hardEdges"], json!(false));
+}

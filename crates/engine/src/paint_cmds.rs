@@ -58,6 +58,7 @@ fn fill_mode(p: &Value) -> Result<FillMode> {
 fn bucket(s: &mut Session, p: &Value) -> Result<Value> {
     let fg = s.tools.foreground;
     let c = color(p.get("color"), fg);
+    let c = s.active().map_or(c, |st| crate::channel_cmds::ink_paint_color(&st.doc, p, c));
     let (x, y) = (f(p, "x", 0.0).floor() as i32, f(p, "y", 0.0).floor() as i32);
     let (tol, contiguous, aa) = (f(p, "tolerance", 32.0), b(p, "contiguous", true), b(p, "antiAlias", true));
     let opacity = opacity(p, "paint.bucket")?;
@@ -154,6 +155,10 @@ fn gradient(s: &mut Session, p: &Value) -> Result<Value> {
                 .collect()
         }
         _ => stops,
+    };
+    let stops = match s.active() {
+        Some(st) => stops.into_iter().map(|(t, c)| (t, crate::channel_cmds::ink_paint_color(&st.doc, p, c))).collect(),
+        None => stops,
     };
     let reverse = b(p, "reverse", false);
     let opacity = opacity(p, "paint.gradient")?;

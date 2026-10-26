@@ -255,7 +255,7 @@ pub fn new_spot_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
 // UV Ink Channel…: a white underbase or varnish channel for UV printing in one step. Name (what
 // the printer's RIP calls the ink: W1/W2 white, W3/W4 varnish in MainTop, one click each) and
 // Choke (pixels to pull the ink in from the edge). OK runs `channel.uvInk` from the selection, or
-// from the artwork when nothing is selected, and remembers both for next time.
+// from the artwork when nothing is selected, and remembers them for next time.
 
 pub const UNDERBASE: &str = "channel.uvInk";
 const UNDERBASE_MARK: &str = "__uvInk";
@@ -264,7 +264,7 @@ pub fn owns_underbase(fields: &Map<String, Value>) -> bool {
     fields.contains_key(UNDERBASE_MARK)
 }
 
-/// The UV Ink Channel fields: the last name and choke (W1 and 0 px at first), or `None`
+/// The UV Ink Channel fields: the last name, choke and edges (W1, 0 px and hard at first), or `None`
 /// without a document.
 pub fn underbase_fields(app: &PhotocraftApp) -> Option<Map<String, Value>> {
     let doc = &app.session.active()?.doc;
@@ -279,6 +279,7 @@ pub fn underbase_fields(app: &PhotocraftApp) -> Option<Map<String, Value>> {
     f.insert("__fromSelection".into(), json!(doc.selection.is_some()));
     f.insert("name".into(), json!(name));
     f.insert("choke".into(), json!(choke));
+    f.insert("hardEdges".into(), json!(saved.get("hardEdges").and_then(Value::as_bool).unwrap_or(true)));
     Some(f)
 }
 
@@ -290,7 +291,7 @@ pub fn open_underbase(app: &mut PhotocraftApp) -> Option<u64> {
 
 pub fn confirm_underbase(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value, String> {
     let mut p = Map::new();
-    for key in ["name", "choke"] {
+    for key in ["name", "choke", "hardEdges"] {
         if let Some(v) = f.get(key) {
             p.insert(key.into(), v.clone());
         }
@@ -326,6 +327,17 @@ pub fn underbase_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
         let mut px = f.get("choke").and_then(Value::as_f64).unwrap_or(0.0) as f32;
         if crate::widgets::value_field(ui, &mut px, 0.0..=max, "px", 64.0).accessible_name(tl!("Choke:")).changed() {
             f.insert("choke".into(), json!(px.round()));
+        }
+    });
+    ui.horizontal(|ui| {
+        label(ui, "");
+        let mut hard = f.get("hardEdges").and_then(Value::as_bool).unwrap_or(true);
+        if ui
+            .checkbox(&mut hard, tl!("Hard edges"))
+            .on_hover_text(tl!("Full ink where the selection is, none anywhere else: a soft selection edge doesn't spread a faint coat of ink."))
+            .changed()
+        {
+            f.insert("hardEdges".into(), json!(hard));
         }
     });
     let from = if f.get("__fromSelection").and_then(Value::as_bool).unwrap_or(false) {

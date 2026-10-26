@@ -254,7 +254,11 @@ fn damage_json(s: &mut Session, dmg: Rect) -> Value {
 fn stroke_target(s: &Session, p: &Value, brush: BrushSettings) -> Result<(Option<photocraft_doc::LayerId>, BrushSettings, f32)> {
     let gray = is_mask_target(p) || crate::channel_cmds::is_channel_target(p);
     let id = if crate::channel_cmds::is_channel_target(p) { None } else { Some(layer_id(s, p)?) };
-    let brush = if gray && brush.erase { BrushSettings { erase: false, color: s.tools.background, ..brush } } else { brush };
+    let mut brush = if gray && brush.erase { BrushSettings { erase: false, color: s.tools.background, ..brush } } else { brush };
+    // A spot channel is painted like Photoshop: black lays ink.
+    if let Some(st) = s.active() {
+        brush.color = crate::channel_cmds::ink_paint_color(&st.doc, p, brush.color);
+    }
     Ok((id, brush, num(p, "zoom").unwrap_or(1.0)))
 }
 

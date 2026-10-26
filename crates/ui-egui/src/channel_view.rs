@@ -182,8 +182,9 @@ fn render_with_source(
     let mut solo_mask = false;
     let mut out: Vec<[f32; 4]> = if vis == 0 {
         if !overlays.is_empty() {
+            // A spot channel alone reads black where there is ink, as it prints.
             let first = overlays.remove(0);
-            gray(&first.surface)
+            sample(&first.surface, r, factor).into_iter().map(|g| first.display_gray(g.clamp(0.0, 1.0))).map(|g| [g, g, g, 1.0]).collect()
         } else if let Some(q) = doc.quick_mask.as_ref().filter(|_| !v.quick_mask_hidden) {
             solo_quick = true;
             gray(&q.surface)
@@ -724,6 +725,21 @@ mod tests {
         let px = render(&st.doc, &st.channel_view, st.doc.bounds(), 2, Look::default(), st.active_layer).unwrap();
         assert_eq!(px.len(), 4 * 2);
         assert_eq!(px[0], Color32::from_rgb(0, 128, 0));
+    }
+
+    #[test]
+    fn solo_spot_channel_reads_black_where_there_is_ink() {
+        let mut s = session();
+        s.execute("select.rect", json!({"x": 0, "y": 0, "width": 2, "height": 4})).unwrap();
+        s.execute("channel.uvInk", json!({})).unwrap();
+        s.execute("channel.target", json!({"channel": 0})).unwrap();
+        let st = s.active().unwrap();
+        let ch = &st.doc.channels[0];
+        assert!(ch.spot.is_some());
+        assert_eq!((ch.display_gray(1.0), ch.display_gray(0.0)), (0.0, 1.0));
+        let px = render(&st.doc, &st.channel_view, st.doc.bounds(), 1, Look::default(), st.active_layer).unwrap();
+        // Like the printed plate and the TIFF the RIP reads: black ink, white paper.
+        assert_eq!((px[0], px[5]), (Color32::BLACK, Color32::WHITE));
     }
 
     #[test]
