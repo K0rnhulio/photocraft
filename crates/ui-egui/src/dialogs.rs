@@ -503,6 +503,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                     }
                 }
                 DialogKind::Command if crate::new_guide_ui::owns(&fields) => crate::new_guide_ui::body(ui, &mut fields),
+                DialogKind::Command if crate::uv_preflight_ui::owns(&fields) => crate::uv_preflight_ui::body(ui, &mut fields),
                 DialogKind::Command if fields.contains_key("__form") => crate::view_cmds::form_body(ui, &mut fields),
                 DialogKind::Command => {}
                 DialogKind::LayerStyle => crate::layer_style::body(app, ui, &mut fields),
@@ -530,7 +531,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 // (larger) size, so a dialog whose body gets shorter would never shrink back.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
-                    if matches!(d.kind, DialogKind::About | DialogKind::Error) {
+                    if matches!(d.kind, DialogKind::About | DialogKind::Error) || crate::uv_preflight_ui::owns(&fields) {
                         // ↩ is OK too, as on every other dialog (#4872), from the frame after the
                         // alert appeared: the ↩ that raised it (committing a locked layer's Free
                         // Transform, say) must not close it again at once.
@@ -663,6 +664,9 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         // A colour swatch (Edit › Fill, Edit › Stroke) opens the Color Picker over the dialog.
         if outcome.is_none() {
             crate::color_picker_ui::open_requested(app, d.id);
+        }
+        if outcome.is_none() {
+            crate::uv_preflight_ui::rerun_requested(app, d.id);
         }
         if apply_requested && outcome.is_none() {
             let _ = crate::prefs_ui::apply(app, d.id);
@@ -841,6 +845,7 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
             r
         }
         DialogKind::Command if crate::open_prompt::owns_damage(&d.fields) => crate::open_prompt::answer_damage(app, true),
+        DialogKind::Command if crate::uv_preflight_ui::owns(&d.fields) => Ok(Value::Null),
         DialogKind::Command if crate::guide_layout_ui::owns(&d.fields) => crate::guide_layout_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::brush_preset_dialog::owns(&d.fields) => crate::brush_preset_dialog::confirm(app, &d.fields),
         DialogKind::Command if crate::fill_ui::owns(&d.fields) => crate::fill_ui::confirm(app, &d.fields),

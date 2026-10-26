@@ -253,6 +253,7 @@ pub mod type_panels_ui;
 pub mod type_tool;
 mod type_transform;
 pub mod updates_ui;
+pub mod uv_preflight_ui;
 mod variables_ui;
 pub mod vector_ui;
 pub mod view_cmds;

@@ -355,6 +355,8 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
             Ok(json!({"dialog": dialog, "info": crate::gpu_status::system_info_json(app)}))
         }
         "file.export.exportAs" => Ok(json!({"dialog": crate::export_dialog::open(app)?})),
+        // The menu shows the report in a dialog; automation passing params gets just the report.
+        crate::uv_preflight_ui::COMMAND if params.as_object().is_none_or(|o| o.is_empty()) => crate::uv_preflight_ui::open(app),
         "file.export.quickExportAsPng" => crate::export_dialog::quick_export_png(app),
         // Render Video exports a sequence of frames into a folder, not a named file.
         // Keep explicit directory arguments from automation and the control channel unchanged.
@@ -959,6 +961,7 @@ const PLACE_AFTER: &[(&str, &str)] = &[
     ("filter.render.relight", "filter.render.lightingEffects"),
     ("view.resetView", "view.flipHorizontal"),
     ("filter.other.colorToAlpha", "filter.other.offset"),
+    ("file.uvPreflight", "file.printOneCopy"),
 ];
 
 pub fn menu_items(app: &PhotocraftApp) -> Vec<MenuItem> {
