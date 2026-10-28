@@ -1126,3 +1126,56 @@ fn layers_panel_mask_target_isolates_the_curve_channel() {
     let row = isolated_curve_channel_for(s.active().unwrap(), true).expect("quick mask wins");
     assert_eq!((row.name.as_str(), row.gray), ("Quick Mask", Some(GraySurface::QuickMask)));
 }
+
+/// A `w` x `h` PNG, black with a white rectangle at (x, y, rw, rh) and a transparent first row,
+/// as base64.
+fn mask_png(w: u32, h: u32, (x, y, rw, rh): (u32, u32, u32, u32)) -> String {
+    let mut px = Vec::new();
+    for j in 0..h {
+        for i in 0..w {
+            let v = if (x..x + rw).contains(&i) && (y..y + rh).contains(&j) { 255 } else { 0 };
+            px.extend_from_slice(&[v, v, v, if j == 0 { 0 } else { 255 }]);
+        }
+    }
+    let img = photocraft_codecs::Image::from_u8(w, h, photocraft_codecs::ChannelLayout::Rgba, px).unwrap();
+    let bytes = photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &Default::default()).unwrap();
+    photocraft_paint::tile::b64_encode(&bytes)
+}
+
+#[test]
+fn uv_ink_from_a_mask_image() {
+    let mut s = session();
+    let image = mask_png(40, 20, (4, 4, 6, 6));
+    let r = s.execute("channel.uvInk", json!({"name": "W3", "source": "image", "image": image})).unwrap();
+    assert_eq!((r["name"].clone(), r["source"].clone(), r["updated"].clone()), (json!("W3"), json!("image"), json!(false)));
+    assert_eq!((chan(&s, 0, 4, 4), chan(&s, 0, 9, 9), chan(&s, 0, 3, 4), chan(&s, 0, 10, 9)), (1.0, 1.0, 0.0, 0.0));
+    // Black as ink: everything but the rectangle, and the transparent first row none.
+    s.execute("channel.uvInk", json!({"name": "W3", "source": "image", "image": image, "ink": "black"})).unwrap();
+    assert_eq!(doc(&s).channels.len(), 1, "updated in place");
+    assert_eq!((chan(&s, 0, 4, 4), chan(&s, 0, 0, 1), chan(&s, 0, 0, 0)), (0.0, 1.0, 0.0));
+    // Another size is refused unless stretched; stretched, a 20 x 10 mask covers twice the area.
+    let small = mask_png(20, 10, (2, 2, 3, 3));
+    let e = s.execute("channel.uvInk", json!({"source": "image", "image": small})).unwrap_err().to_string();
+    assert!(e.contains("20 x 10") && e.contains("40 x 20") && e.contains("stretch"), "{e}");
+    s.execute("channel.uvInk", json!({"name": "W1", "source": "image", "image": small, "stretch": true})).unwrap();
+    assert_eq!((chan(&s, 1, 4, 4), chan(&s, 1, 9, 9), chan(&s, 1, 3, 4), chan(&s, 1, 10, 9)), (1.0, 1.0, 0.0, 0.0));
+    // Choke and hard edges apply as for any source.
+    s.execute("channel.uvInk", json!({"name": "W1", "source": "image", "image": image, "choke": 1})).unwrap();
+    assert_eq!((chan(&s, 1, 4, 4), chan(&s, 1, 5, 5)), (0.0, 1.0));
+}
+
+#[test]
+fn uv_ink_refuses_a_bad_mask_image() {
+    let mut s = session();
+    for (p, why) in [
+        (json!({"source": "image"}), "needs `image`"),
+        (json!({"source": "image", "image": "*not base64*"}), "base64"),
+        (json!({"source": "image", "image": "aGVsbG8="}), "could not be read"),
+        (json!({"source": "image", "image": mask_png(40, 20, (0, 0, 1, 1)), "ink": "red"}), "`ink`"),
+        (json!({"source": "image", "image": mask_png(40, 20, (0, 0, 0, 0))}), "no ink"),
+    ] {
+        let e = s.execute("channel.uvInk", p.clone()).unwrap_err().to_string();
+        assert!(e.contains(why), "{p}: {e}");
+    }
+    assert!(doc(&s).channels.is_empty());
+}

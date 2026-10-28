@@ -82,6 +82,19 @@ fn artwork_png(dir: &std::path::Path) -> &'static str {
     "artwork.png"
 }
 
+/// `masks/w4.png`: a `w` x `h` mask, white on its left half.
+fn mask_png(dir: &std::path::Path, w: u32, h: u32) {
+    let mut px = Vec::with_capacity((w * h) as usize);
+    for _ in 0..h {
+        for x in 0..w {
+            px.push(if x < w / 2 { 255 } else { 0 });
+        }
+    }
+    let img = photocraft_codecs::Image::from_u8(w, h, photocraft_codecs::ChannelLayout::Gray, px).unwrap();
+    std::fs::create_dir_all(dir.join("masks")).unwrap();
+    std::fs::write(dir.join("masks/w4.png"), photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &Default::default()).unwrap()).unwrap();
+}
+
 fn channel<'a>(report: &'a Value, name: &str) -> &'a Value {
     report["channels"].as_array().and_then(|a| a.iter().find(|c| c["name"] == name)).unwrap_or_else(|| panic!("no {name} channel: {report}"))
 }
@@ -123,12 +136,22 @@ async fn uv_print_job_from_artwork_to_tiff() {
     assert!(m1 > 0.0 && m3 > 0.0 && m3 < m1, "W1 {m1}, W3 {m3}");
     assert!((m3 / m1 - 2.0 / 3.0).abs() < 0.05, "varnish should be about 2/3 of the underbase: W1 {m1}, W3 {m3}");
 
-    // Save the print file and check the spot channels come back from it.
-    tool(&c, "doc_save", json!({"path": "print.tif"})).await;
-    tool(&c, "doc_open", json!({"path": "print.tif"})).await;
+    // A mask made elsewhere (white = ink, the page's size) loads straight into W4.
+    mask_png(&dir, 1417, 2126);
+    let r = tool(&c, "channel_from_image", json!({"path": "masks/w4.png", "name": "W4"})).await;
+    assert_eq!((r["name"].clone(), r["source"].clone()), (json!("W4"), json!("image")), "{r}");
+    let report = run(&c, "file.uvPreflight", json!({})).await;
+    let w4 = channel(&report, "W4")["mean"].as_f64().unwrap();
+    assert!((w4 - 0.5).abs() < 0.01, "the mask's left half: {w4}");
+
+    // Save the print file into a folder that doesn't exist yet, and check the spot channels come
+    // back from it.
+    tool(&c, "doc_save", json!({"path": "out/anna/print.tif"})).await;
+    tool(&c, "doc_open", json!({"path": "out/anna/print.tif"})).await;
     let reopened = run(&c, "file.uvPreflight", json!({})).await;
     assert_eq!(channel(&reopened, "W1")["kind"], "spot", "{reopened}");
     assert_eq!(channel(&reopened, "W3")["kind"], "spot", "{reopened}");
+    assert_eq!(channel(&reopened, "W4")["kind"], "spot", "{reopened}");
     assert_eq!(reopened["size"]["width"], 1417, "{reopened}");
 
     shutdown(c, server).await;

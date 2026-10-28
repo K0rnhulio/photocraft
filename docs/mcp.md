@@ -59,11 +59,11 @@ described in [development.md](development.md). UI tools require a running deskto
 
 Use absolute root paths in MCP client configurations, since a relative root is resolved from
 the client's launch directory. In bridge mode, configure roots on the **desktop app**; root
-flags on `photocraft-cli mcp --bridge` are rejected. Explicit `--control-token` and
+flags on `photocraft-cli mcp --bridge` are rejected, except with `--launch`: then the bridge starts the app (`--launch` alone: the `photocraft` next to the CLI; `--launch <APP>`: that program) with control on, the `--control-token-file` token and those roots whenever nothing listens on the port, and waits for it. Explicit `--control-token` and
 `--control-token-file` flags require `--bridge` (or `PHOTOCRAFT_CONTROL_PORT`) and are mutually
 exclusive. Bridge credentials can also come from `PHOTOCRAFT_CONTROL_TOKEN` or `PHOTOCRAFT_CONTROL_TOKEN_FILE`.
 
-MCP and `serve` launch options (all but `--help`/`-h`) take one non-empty value each and cannot
+MCP and `serve` launch options (all but `--help`/`-h`, and `--launch`, whose value is optional) take one non-empty value each and cannot
 be repeated. Missing values, stray positional arguments and options for the wrong mode are
 usage errors (exit 2), reported on stderr before the server starts; stdout stays available for
 protocol messages. For `serve`, explicit credential flags require `--port` (or
@@ -85,6 +85,12 @@ protocol messages. For `serve`, explicit credential flags require `--port` (or
   present, `null` when absent). A disabled vector mask still has `hasVectorMask:true`.
 - `render_preview`: bounded PNG content; `index` and `max_side` (default 1024, maximum 2048).
 - `ui_inspect` and `ui_screenshot`: live app state/window in bridge mode.
+- `session_list`: the open documents (active index, name, size, path, dirty), in both modes.
+  `doc_select`, `doc_close` and `doc_save`/`doc_export` with `index` also work in both modes;
+  `doc_export` creates missing folders inside the write root.
+- `channel_from_image`: `path` to a mask image under the read root, optional `name`, `ink`
+  (`white`, the default, or `black`), `choke`, `hardEdges` and `stretch`; makes or updates a
+  spot ink channel (`channel.uvInk` with `source: "image"`) in one history step.
 
 Existing document/session/job/UI tools remain listed, including the documented
 `doc_render_preview` spelling. There are no hidden legacy aliases. Every tool has a title

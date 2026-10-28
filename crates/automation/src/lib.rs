@@ -26,7 +26,7 @@ pub mod security;
 pub mod server;
 pub mod workspace;
 
-pub use bridge::BridgeClient;
+pub use bridge::{BridgeClient, Launcher};
 pub use headless::Headless;
 pub use server::{Backend, PhotocraftMcp};
 pub use workspace::AuthorizedWorkspace;

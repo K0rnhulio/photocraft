@@ -104,7 +104,10 @@ The transport is `apps/photocraft/src/control_server.rs`, and the handlers are i
   another document becomes active before the capture, the request fails with an error rather than
   saving the wrong document
 - `ui.focus`: bring the main window to the front
-- `app.open {path}` / `app.save {path?, tgaBits?, ddsCompression?, ddsMipmaps?, quality?, jpegFormat?}` (JPEG: `quality` on the 0–12 scale, `jpegFormat` `baseline`, `optimized` or `progressive`; automation never shows JPEG Options): relative file I/O through the configured automation roots (`app.open` reads under the read root, `app.save` writes under the write root; absolute paths, `..` and paths escaping the root are refused, and both fail closed when no root was granted). Both reply with `warnings` (import/export notes such as "adjustment layer flattened"; `[]` when none), also shown to the user in the status bar and as a notice (`notices` in `ui.inspect`); `app.open` also returns the `path` and document `name` (directory `.pcraft` — the native on-disk form — loads through the read root's capability; the single-file (zip) form takes the bytes path), `app.save` the `path` written. `app.save` without `path` writes back only to the document's own PSD, PSB or `.pcraft` file, like File › Save. `tgaBits` (24 or 32) sets a TGA's bits per pixel: 32 writes the alpha channel (or else the transparency) as its alpha, 24 none; without it, 32 with an alpha channel or transparency, else 24. `ddsCompression` (`none`, `bc1`, `bc2` or `bc3`) and `ddsMipmaps` (bool) set a DDS texture's compression and mip chain; without them, uncompressed without mipmaps. Automation saves never show TGA, DDS, JPEG or TIFF options. Automation opens and saves never fire script events. Use these two rather than `file.open`, `file.save`, `file.saveAs` or `file.saveACopy`, which the control channel refuses (see [Engine commands](#engine-commands))
+- `app.open {path}` / `app.save {path?, tgaBits?, ddsCompression?, ddsMipmaps?, quality?, jpegFormat?}` (JPEG: `quality` on the 0–12 scale, `jpegFormat` `baseline`, `optimized` or `progressive`; automation never shows JPEG Options): relative file I/O through the configured automation roots (`app.open` reads under the read root, `app.save` writes under the write root; absolute paths, `..` and paths escaping the root are refused, and both fail closed when no root was granted). Both reply with `warnings` (import/export notes such as "adjustment layer flattened"; `[]` when none), also shown to the user in the status bar and as a notice (`notices` in `ui.inspect`); `app.open` also returns the `path` and document `name` (directory `.pcraft` — the native on-disk form — loads through the read root's capability; the single-file (zip) form takes the bytes path), `app.save` the `path` written. `app.save {document}` saves the open document at that index (it becomes the active one first). Missing folders in the `app.save` path are created inside the write root. `app.save` without `path` writes back only to the document's own PSD, PSB or `.pcraft` file, like File › Save. `tgaBits` (24 or 32) sets a TGA's bits per pixel: 32 writes the alpha channel (or else the transparency) as its alpha, 24 none; without it, 32 with an alpha channel or transparency, else 24. `ddsCompression` (`none`, `bc1`, `bc2` or `bc3`) and `ddsMipmaps` (bool) set a DDS texture's compression and mip chain; without them, uncompressed without mipmaps. Automation saves never show TGA, DDS, JPEG or TIFF options. Automation opens and saves never fire script events. Use these two rather than `file.open`, `file.save`, `file.saveAs` or `file.saveACopy`, which the control channel refuses (see [Engine commands](#engine-commands))
+- `app.documents`: the open documents (`active` index and one short row per document: name, size, path, dirty), the same list headless `session.list` returns. Use it instead of `ui.inspect` when only the documents are needed
+- `app.select {index}`: make the document at `index` (from `app.documents`) the active one, like clicking its tab
+- `app.uvInkFromFile {path, name?, ink?, choke?, hardEdges?, stretch?, wait?}`: read a mask image (PNG, TIFF, JPEG…) under the read root and make it a spot ink channel with `channel.uvInk {source: "image"}` in one history step. White is ink (`ink: "black"` for the other way round) and transparent pixels are no ink. The image must be the document's size unless `stretch` is true
 - `app.quit`
 
 ## Engine commands
@@ -330,6 +333,8 @@ magenta alignment lines. `ui.pointer` drives the same code, so agents get identi
 - **Headless** (`photocraft-cli mcp`): an in-process `photocraft_engine::Session`. There is no window.
 - **Bridge** (`photocraft-cli mcp --bridge 127.0.0.1:7878 --control-token-file <path>`): every tool is forwarded to a running `photocraft --control 7878 --control-token-file <path>` over this protocol, so agents see and drive the live app. `--bridge 7878` is short for `--bridge 127.0.0.1:7878`. With no `--bridge`, `PHOTOCRAFT_CONTROL_PORT` selects the bridge port (`127.0.0.1:<port>`), and the CLI says so on standard error; with neither (or the variable empty), the MCP runs headless. A value that is not a port is a usage error naming the variable. `--automation-read-root` or `--automation-write-root` with the variable set is a usage error, since the bridge would drop the roots.
 
+With `--launch` (needs `--bridge` with a port and `--control-token-file`), the bridge starts the app itself when nothing listens on the port: it runs `photocraft --control <port> --control-token-file <file>` plus the `--automation-read-root`/`--automation-write-root` given to the CLI (which go to the app in this case), and waits up to 45s for it to listen. `--launch` alone starts the `photocraft` next to `photocraft-cli`; `--launch <APP>` starts that program. The token file is created first when it is missing, so the CLI and the app share it. The app is started at most once per wait, so a call that finds it still starting does not start a second copy.
+
 The bridge keeps one authenticated TCP connection open, and drops and reconnects before a call once the connection has been idle long enough that the app (which closes idle connections after 30s) may have dropped it. A transport failure while sending a request or waiting for its reply, including a reply timeout, drops the connection and reports that the operation may have completed; inspect the document before retrying an edit. Edits are never automatically resent (#1007); a connection that could not be established is reported as "the request was not sent" instead. The MCP server opts its pure-read tools (`ui_inspect`, `doc_inspect`, `command_list`, `jobs_list`, `session_list`, `ui_screenshot`) into one automatic retry on a fresh connection, since a read applies nothing; clients driving `BridgeClient` directly opt in per call with `call_read`. The next separate call reconnects and authenticates, and reply lines whose `id` does not match the request are skipped. The client's call timeout is 55s, strictly below the server's 60s reply deadline, so the bridge's error is the one callers see; commands that can run longer should pass `"wait": false` and poll `jobs.list`. It only accepts loopback addresses, because the app only listens on loopback. Supply its bearer token with `--control-token-file`, `--control-token`, `PHOTOCRAFT_CONTROL_TOKEN_FILE`, or `PHOTOCRAFT_CONTROL_TOKEN`:
 
 ```sh
@@ -352,9 +357,13 @@ How each MCP tool maps onto control methods in bridge mode:
 | `doc_export_layers {dir, …}` | `engine.execute {command: "file.export.layersToFiles", params}` |
 | `doc_export_data_sets {dir, …}` | `engine.execute {command: "file.export.dataSetsAsFiles", params}` |
 | `doc_import_data_sets {path, …}` | `engine.execute {command: "file.import.variableDataSets", params}` |
-| `doc_save {path?, tgaBits?, ddsCompression?, ddsMipmaps?}` / `doc_export {path, tgaBits?, ddsCompression?, ddsMipmaps?}` | `app.save {path?, tgaBits?, ddsCompression?, ddsMipmaps?}` |
+| `doc_save {path?, index?, tgaBits?, ddsCompression?, ddsMipmaps?}` / `doc_export {path, index?, tgaBits?, ddsCompression?, ddsMipmaps?}` | `app.save {path?, document: index, tgaBits?, ddsCompression?, ddsMipmaps?}` |
+| `doc_select {index}` | `app.select {index}` |
+| `doc_close {index}` | `engine.execute {command: "file.close", params: {document: index}}`, then `app.documents` |
+| `channel_from_image {path, name?, ink?, choke?, hardEdges?, stretch?}` | `app.uvInkFromFile {…}` |
 | `doc_render_preview {max_side?}` | `ui.screenshot`, returned directly as PNG image content |
-| `session_list`, `ui_inspect` | `ui.inspect` |
+| `session_list` | `app.documents` |
+| `ui_inspect` | `ui.inspect` |
 | `ui_screenshot {max_side?}` | `ui.screenshot`, returned as PNG image content |
 | `ui_pointer {events, modifiers?, button?}` | `ui.pointer` (other arguments are an error) |
 | `ui_menu_invoke {id}` | `ui.menu.invoke` |
@@ -363,7 +372,7 @@ How each MCP tool maps onto control methods in bridge mode:
 
 Bridge previews capture the app window; passing `index` is an error. Headless `doc_render_preview` supports `index` without changing the active document.
 
-`doc_select` and `doc_close` work only in headless mode. The `ui_*` tools and `control_call` work only in bridge mode; in headless mode they return a tool error that explains how to start bridge mode.
+`doc_select`, `doc_close` and `doc_save`/`doc_export` with an `index` work in both modes. The `ui_*` tools and `control_call` work only in bridge mode; in headless mode they return a tool error that explains how to start bridge mode.
 
 **Security note:** TCP control uses a bearer token, not client identity or general per-method
 authorization. A client that possesses the token receives the non-filesystem control surface,
@@ -383,7 +392,7 @@ beneath it. An absolute path is compared with the root as text and the rest is c
 relative path; nothing is resolved on the filesystem. Absolute paths outside the root, parent
 traversal, alternate separators in relative paths, drive/device/stream prefixes, malformed
 components, and link escapes are rejected before file effects. Read and write authority are
-independent; the parent of a new output file must already exist. Engine commands that still use
+independent; missing folders in an output path are created inside the write root. Engine commands that still use
 ambient filesystem paths are disabled for automation until they are migrated to the same
 capability interface. Interactive desktop file pickers retain normal user-selected access.
 

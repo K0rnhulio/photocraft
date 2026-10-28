@@ -355,6 +355,8 @@ fn color_range(s: &mut Session, p: &Value) -> Result<Value> {
     if b(p, "detectFaces", false) {
         return Err(bad("detectFaces: face detection isn't available yet; select without it".into()));
     }
+    // The colours the eyedropper points picked, reported so a caller sees what it sampled.
+    let mut sampled: Vec<String> = Vec::new();
     let (area, mut mask) = match preset {
         "sampledColors" => {
             let (area, px) = sample_pixels(s, b(p, "sampleAllLayers", true))?;
@@ -364,8 +366,13 @@ fn color_range(s: &mut Session, p: &Value) -> Result<Value> {
             // limits the result (scope_color_range), not where colours are picked (#5244).
             let plus = eyedropper_samples(p, "points", area, &px, &bad)?;
             let minus = eyedropper_samples(p, "subtractPoints", area, &px, &bad)?;
-            let query = ColorRangeSamples::with_samples(s, p, area, &plus, &minus)?;
-            let mask = query.coverage(&px, w, 1.0, [0.0, 0.0]);
+            sampled = plus.iter().map(|x| hex(x.color)).collect();
+            let mask = if b(p, "separately", false) {
+                separate_ranges(s, p, area, &px, &plus, &minus)?
+            } else {
+                let query = ColorRangeSamples::with_samples(s, p, area, &plus, &minus)?;
+                query.coverage(&px, w, 1.0, [0.0, 0.0])
+            };
             (area, mask)
         }
         "reds" | "yellows" | "greens" | "cyans" | "blues" | "magentas" => {
@@ -428,8 +435,85 @@ fn color_range(s: &mut Session, p: &Value) -> Result<Value> {
     }
     // Invert the colour result first, then constrain it to the original selection.
     // Add mode must still be able to extend an existing selection intentionally.
-    scope_color_range(&mut mask, &s.active().ok_or(EngineError::NoDocument)?.doc, area, selection_mode);
-    set_selection(s, "Color Range", area, mask, selection_mode)
+    let doc = &s.active().ok_or(EngineError::NoDocument)?.doc;
+    let limited = selection_mode == SelectionMode::Replace && doc.selection.is_some();
+    scope_color_range(&mut mask, doc, area, selection_mode);
+    let mut result = set_selection(s, "Color Range", area, mask, selection_mode)?;
+    // How much is selected now, so a caller (an agent above all) can tell a range that missed
+    // from one that worked without looking at the canvas.
+    let (_, now) = current_mask(&s.active().ok_or(EngineError::NoDocument)?.doc);
+    let n = now.len().max(1) as f64;
+    let full = now.iter().filter(|v| **v >= 0.5).count();
+    let partial = now.iter().filter(|v| **v > 0.0 && **v < 0.5).count();
+    let percent = |c: usize| (c as f64 / n * 1000.0).round() / 10.0;
+    result["selectedPercent"] = json!(percent(full));
+    result["partlyPercent"] = json!(percent(partial));
+    if !sampled.is_empty() {
+        result["sampled"] = json!(sampled);
+    }
+    if limited {
+        result["limitedToSelection"] = json!(true);
+    }
+    if full == 0 {
+        let mut why = String::from("nothing is at least half selected");
+        if partial > 0 {
+            why.push_str(" (some pixels are partly selected: raise `fuzziness`)");
+        }
+        if limited {
+            why.push_str("; the result is limited to the selection that was active: deselect first to search the whole image");
+        }
+        result["note"] = json!(why);
+    }
+    Ok(result)
+}
+
+fn hex([r, g, b]: [f32; 3]) -> String {
+    let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", c(r), c(g), c(b))
+}
+
+/// Color Range with `"separately": true`: every colour (`color`, each of `colors` and each
+/// eyedropper point) selects its own range and the results add up, instead of one range spanning
+/// all of them (Photoshop's Add to Sample, which from black and red also takes the browns and
+/// dark greys in between).
+fn separate_ranges(s: &Session, p: &Value, area: Rect, px: &[[f32; 4]], plus: &[sel::RangeSample], minus: &[sel::RangeSample]) -> Result<Vec<f32>> {
+    let bad = |msg: &str| EngineError::BadParams { cmd: "select.colorRange".into(), msg: msg.into() };
+    if !minus.is_empty() || p.get("order").is_some() || b(p, "localized", false) {
+        return Err(bad("`separately` takes `color`, `colors` and `points` only, not `subtractPoints`, `order` or `localized`"));
+    }
+    let mut colours: Vec<Value> = p.get("colors").and_then(Value::as_array).cloned().unwrap_or_default();
+    if let Some(c) = p.get("color") {
+        colours.push(c.clone());
+    }
+    if colours.is_empty() && plus.is_empty() {
+        return Err(bad("`separately` needs `colors`, `color` or `points`"));
+    }
+    let only = |extra: Option<Value>| {
+        let mut q = p.clone();
+        if let Some(o) = q.as_object_mut() {
+            for key in ["color", "colors", "points"] {
+                o.remove(key);
+            }
+            if let Some(c) = extra {
+                o.insert("colors".into(), json!([c]));
+            }
+        }
+        q
+    };
+    let w = area.width() as usize;
+    let mut mask = vec![0.0f32; px.len()];
+    let mut add = |part: Vec<f32>| {
+        for (m, v) in mask.iter_mut().zip(part) {
+            *m = m.max(v);
+        }
+    };
+    for c in colours {
+        add(ColorRangeSamples::with_samples(s, &only(Some(c)), area, &[], &[])?.coverage(px, w, 1.0, [0.0, 0.0]));
+    }
+    for point in plus {
+        add(ColorRangeSamples::with_samples(s, &only(None), area, std::slice::from_ref(point), &[])?.coverage(px, w, 1.0, [0.0, 0.0]));
+    }
+    Ok(mask)
 }
 
 fn modify(s: &mut Session, p: &Value, op: &str) -> Result<Value> {
@@ -667,7 +751,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "select.colorRange",
             "Color Range…",
             ["Select"],
-            r##"{"select":"sampledColors|reds|yellows|greens|cyans|blues|magentas|highlights|midtones|shadows|skinTones|outOfGamut"="sampledColors","color":"#rrggbb"=foreground,"colors":["#rrggbb",…]?,"points":[[x,y],…]? (eyedropper samples),"subtractPoints":[[x,y],…]? (minus eyedropper),"order":["+"|"-",…]? (click order of points and subtractPoints; default all points first),"fuzziness":0..200=40 (tones: 0..100 %=20),"detectFaces":bool=false (not available yet: refused),"localized":bool=false,"range":0..100=100 (% of the longer side),"tonalRange":level|[lo,hi] (shadows 65, highlights 190, midtones [105,150]),"invert":bool=false,"sampleAllLayers":bool=true,"mode":"replace|add|subtract|intersect"="replace"}"##,
+            r##"{"select":"sampledColors|reds|yellows|greens|cyans|blues|magentas|highlights|midtones|shadows|skinTones|outOfGamut"="sampledColors","color":"#rrggbb"=foreground,"colors":["#rrggbb",…]?,"points":[[x,y],…]? (eyedropper samples),"subtractPoints":[[x,y],…]? (minus eyedropper),"order":["+"|"-",…]? (click order of points and subtractPoints; default all points first),"fuzziness":0..200=40 (tones: 0..100 %=20),"detectFaces":bool=false (not available yet: refused),"localized":bool=false,"range":0..100=100 (% of the longer side),"tonalRange":level|[lo,hi] (shadows 65, highlights 190, midtones [105,150]),"invert":bool=false,"sampleAllLayers":bool=true,"mode":"replace|add|subtract|intersect"="replace","separately":bool=false (each of color, colors and points selects its own range and they add up, instead of one range spanning them all: black and red without the browns between)} → {selected,selectedPercent,partlyPercent (of the canvas: at least half, and less than half selected),sampled:["#rrggbb"]? (the colours points picked),limitedToSelection:true? (replace mode keeps the result inside the selection that was active),note? (why nothing got selected)}"##,
             has_doc,
             color_range
         ),
@@ -734,6 +818,62 @@ mod tests {
         if s.active().unwrap().doc.selection.is_some() {
             s.execute("select.deselect", json!({})).unwrap();
         }
+    }
+
+    /// Black at (5..15, 5..15), red at (25..35, 5..15) and a brown between them at (5..15, 20..28),
+    /// on white.
+    fn session_black_red_brown() -> Session {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 40, "height": 30})).unwrap();
+        s.edit("paint", |doc, _| {
+            let bg = doc.layers[0].surface_mut().unwrap();
+            bg.fill_rect(Rect::new(5, 5, 15, 15), &[0.0, 0.0, 0.0, 1.0]);
+            bg.fill_rect(Rect::new(25, 5, 35, 15), &[0.8, 0.05, 0.05, 1.0]);
+            bg.fill_rect(Rect::new(5, 20, 15, 28), &[0.4, 0.03, 0.03, 1.0]);
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    #[test]
+    fn color_range_separately_selects_each_colour_without_the_ones_between() {
+        let mut s = session_black_red_brown();
+        // One range spanning black and red takes the dark red-brown between them too.
+        s.execute("select.colorRange", json!({"colors": ["#000000", "#cc0d0d"], "fuzziness": 10})).unwrap();
+        assert_eq!((coverage(&s, 10, 10), coverage(&s, 30, 10), coverage(&s, 10, 24)), (1.0, 1.0, 1.0));
+        clear_selection(&mut s);
+        // Separately, each colour is its own range: the brown stays out.
+        for p in [
+            json!({"colors": ["#000000", "#cc0d0d"], "fuzziness": 10, "separately": true}),
+            json!({"points": [[6, 6], [30, 10]], "fuzziness": 10, "separately": true}),
+            json!({"color": "#000000", "colors": ["#cc0d0d"], "fuzziness": 10, "separately": true}),
+        ] {
+            let r = s.execute("select.colorRange", p.clone()).unwrap();
+            assert_eq!((coverage(&s, 10, 10), coverage(&s, 30, 10), coverage(&s, 10, 24), coverage(&s, 2, 2)), (1.0, 1.0, 0.0, 0.0), "{p}");
+            // 2 x 100 of the 1200 pixels.
+            assert_eq!(r["selectedPercent"], json!(16.7), "{p}: {r}");
+            clear_selection(&mut s);
+        }
+        let e = s.execute("select.colorRange", json!({"points": [[6, 6]], "subtractPoints": [[30, 10]], "separately": true})).unwrap_err();
+        assert!(e.to_string().contains("separately"), "{e}");
+        let e = s.execute("select.colorRange", json!({"separately": true})).unwrap_err();
+        assert!(e.to_string().contains("needs"), "{e}");
+    }
+
+    #[test]
+    fn color_range_reports_what_it_selected() {
+        let mut s = session_black_red_brown();
+        let r = s.execute("select.colorRange", json!({"points": [[30, 10]], "fuzziness": 10})).unwrap();
+        assert_eq!(r["sampled"], json!(["#cc0d0d"]), "{r}");
+        assert_eq!(r["selectedPercent"], json!(8.3), "{r}");
+        assert!(r.get("note").is_none() && r.get("limitedToSelection").is_none(), "{r}");
+        // Replace mode stays inside the active selection: nothing red in it, and the note says why.
+        s.execute("select.rect", json!({"x": 0, "y": 0, "width": 4, "height": 4})).unwrap();
+        let r = s.execute("select.colorRange", json!({"select": "reds"})).unwrap();
+        assert_eq!((r["selectedPercent"].clone(), r["limitedToSelection"].clone()), (json!(0.0), json!(true)), "{r}");
+        let note = r["note"].as_str().unwrap();
+        assert!(note.contains("nothing") && note.contains("deselect"), "{note}");
     }
 
     #[test]

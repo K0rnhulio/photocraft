@@ -183,6 +183,10 @@ fn server_modes_reject_ignored_or_conflicting_options() {
     for flag in ["--automation-read-root", "--automation-write-root"] {
         server_usage_error(&["mcp", "--bridge", "127.0.0.1:7878", flag, "."], "configure automation roots on the desktop app");
     }
+    // --launch starts the app for the bridge, with the token from a file.
+    server_usage_error(&["mcp", "--launch"], "--launch requires --bridge and --control-token-file");
+    server_usage_error(&["mcp", "--bridge", "7878", "--launch"], "--launch requires --bridge and --control-token-file");
+    server_usage_error(&["mcp", "--bridge", "7878", "--control-token", &"a".repeat(64), "--launch"], "--launch requires --bridge and --control-token-file");
 }
 
 /// Each launch line would, before validation, have started a TCP server and written the token file.

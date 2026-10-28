@@ -160,7 +160,7 @@ pub(crate) fn apply_to_surface(command: &str, params: &Value, surf: &Surface, se
 /// Largest base64 payload `plugin.install` accepts (the module limit, encoded).
 const MAX_DATA_CHARS: usize = (32 << 20) / 3 * 4 + 4;
 
-fn b64_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn b64_decode(s: &str) -> Option<Vec<u8>> {
     let val = |c: u8| -> Option<u32> {
         Some(u32::from(match c {
             b'A'..=b'Z' => c - b'A',

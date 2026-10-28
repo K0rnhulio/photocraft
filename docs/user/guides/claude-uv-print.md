@@ -41,20 +41,11 @@ the path, for example `C:\PhotoCraftJobs`, and put the customer images there.
 
 ## 3a. Live mode: Claude drives your open PhotoCraft
 
-Start PhotoCraft with its control port on. Save this as `C:\photocraft\PhotoCraft for Claude.bat`
-and double-click it whenever you want Claude to help:
-
-```bat
-@echo off
-start "" "C:\photocraft\target\release\photocraft.exe" --control 7878 ^
-  --control-token-file "%LOCALAPPDATA%\PhotoCraft\control.token" ^
-  --automation-read-root "C:\PhotoCraftJobs" --automation-write-root "C:\PhotoCraftJobs"
-```
-
-The first start creates the token file (a password Claude uses to connect). Preferences ›
-Integrations › Allow Agent Control must stay on (it is by default).
-
-Then tell Claude where to connect.
+PhotoCraft listens for Claude only when it was started with its control port on. With `--launch`
+in the config below, the MCP server starts PhotoCraft that way by itself whenever Claude needs it
+and nothing is listening yet, so you don't have to remember. The token file (a password Claude
+uses to connect) is created on first use. Preferences › Integrations › Allow Agent Control must
+stay on (it is by default).
 
 **Claude Desktop:** open Settings › Developer › Edit Config. That opens the folder holding
 `claude_desktop_config.json`. Where it is depends on how Claude was installed:
@@ -74,7 +65,10 @@ then quit Claude from its icon next to the clock (closing the window is not enou
     "photocraft": {
       "command": "C:\\photocraft\\target\\release\\photocraft-cli.exe",
       "args": ["mcp", "--bridge", "127.0.0.1:7878",
-               "--control-token-file", "C:\\Users\\YOURNAME\\AppData\\Local\\PhotoCraft\\control.token"]
+               "--control-token-file", "C:\\Users\\YOURNAME\\AppData\\Local\\PhotoCraft\\control.token",
+               "--launch",
+               "--automation-read-root", "C:\\PhotoCraftJobs",
+               "--automation-write-root", "C:\\PhotoCraftJobs"]
     }
   }
 }
@@ -83,10 +77,21 @@ then quit Claude from its icon next to the clock (closing the window is not enou
 If the file already has other servers, add `"photocraft": {…}` inside the existing
 `"mcpServers"` block instead of making a second one.
 
+`--launch` starts the `photocraft.exe` next to `photocraft-cli.exe`, and the two folder options
+are passed on to it. If PhotoCraft is already open but was started from the Start menu, it isn't
+listening: close it and let Claude start it, or start it yourself with a `.bat` file such as:
+
+```bat
+@echo off
+start "" "C:\photocraft\target\release\photocraft.exe" --control 7878 ^
+  --control-token-file "%LOCALAPPDATA%\PhotoCraft\control.token" ^
+  --automation-read-root "C:\PhotoCraftJobs" --automation-write-root "C:\PhotoCraftJobs"
+```
+
 **Claude Code** (in a terminal):
 
 ```powershell
-claude mcp add photocraft -- C:\photocraft\target\release\photocraft-cli.exe mcp --bridge 127.0.0.1:7878 --control-token-file "$env:LOCALAPPDATA\PhotoCraft\control.token"
+claude mcp add photocraft -- C:\photocraft\target\release\photocraft-cli.exe mcp --bridge 127.0.0.1:7878 --control-token-file "$env:LOCALAPPDATA\PhotoCraft\control.token" --launch --automation-read-root C:\PhotoCraftJobs --automation-write-root C:\PhotoCraftJobs
 ```
 
 ## 3b. Background mode: no window
@@ -124,15 +129,25 @@ These are the PhotoCraft commands Claude uses for it (all through the `command_r
 |---|---|---|
 | Fit to the print size | `image.fitToPrint` | `{"width":120,"height":180,"artWidth":100,"artHeight":160,"trim":"white"}` |
 | Select everything that isn't white | `select.colorRange` | `{"color":"#ffffff","fuzziness":20,"invert":true}` |
-| Select colours for gloss | `select.colorRange` | `{"colors":["#000000","#c00000"],"fuzziness":40}`, or `{"select":"shadows"}` / `{"select":"reds"}` with `"mode":"add"` |
+| Select colours for gloss | `select.colorRange` | `{"colors":["#000000","#c00000"],"fuzziness":40,"separately":true}`, or `{"select":"shadows"}` / `{"select":"reds"}` with `"mode":"add"` |
 | Make a white or varnish channel | `channel.uvInk` | `{"name":"W1","source":"selection","choke":1}`, `{"name":"W3","source":"selection"}` |
+| Use a mask you made elsewhere | `channel_from_image` tool | `{"path":"masks/anna-w3.png","name":"W3"}` (white = ink) |
 | Check before printing | `file.uvPreflight` | `{}` |
 | See white and gloss on a material | `view.printPreview` | `{}` |
-| Save for the RIP | `doc_save` tool | `{"path":"anna-print.tif"}` (spot channels are kept) |
+| Save for the RIP | `doc_export` tool | `{"path":"out/anna/print.tif"}` (spot channels are kept; missing folders are made) |
 
 `image.fitToPrint` does Trim, Image Size and Canvas Size in one undo step, so Edit › Undo takes the
 whole fit back. Its `width`/`height` are the page and `artWidth`/`artHeight` the box the artwork
 must fit inside, all in millimetres.
+
+About Color Range: with several colours it normally selects everything between them too (black
+and red also picks up the browns), so pass `"separately": true` to select only near each colour.
+Each reply says how much was selected (`selectedPercent`) and which colours were sampled
+(`sampled`), and adds a `note` when almost nothing was. In the default replace mode it only looks
+inside an existing selection; deselect first (`select.deselect`) or use `"mode":"add"`.
+
+With several documents open, `session_list` lists them, and `doc_select`, `doc_close` and
+`doc_export` take an `index`, in live mode too.
 
 ## When something doesn't work
 
@@ -140,11 +155,12 @@ must fit inside, all in millimetres.
   folder (see the table above: the Microsoft Store version doesn't read `%APPDATA%\Claude`), the
   path in `command` is wrong, or Claude wasn't fully quit. In PowerShell, run the same path with
   `mcp --help`; it should print help.
-- **photocraft is Running but Claude says it can't connect:** PhotoCraft isn't running, or was
-  started from the Start menu or a shortcut instead of the `.bat` file, which is the only start
-  that opens port 7878. Save your work, close every PhotoCraft window and start it with the `.bat`
-  file. `Test-NetConnection 127.0.0.1 -Port 7878 -InformationLevel Quiet` prints `True` once it
+- **photocraft is Running but Claude says it can't connect:** without `--launch` in the config,
+  PhotoCraft isn't running or was started from the Start menu or a shortcut, which doesn't open
+  port 7878. Add `--launch` (see 3a), or save your work, close every PhotoCraft window and start
+  it with the `.bat` file. If Claude says it started PhotoCraft but it did not listen, check that
+  Allow Agent Control is on. `Test-NetConnection 127.0.0.1 -Port 7878 -InformationLevel Quiet` prints `True` once it
   listens.
 - **"automation filesystem access is not granted" or a path is refused:** the file isn't inside
   `C:\PhotoCraftJobs` (or the folder you named in both places).
-- In live mode, `doc_save` takes only `path`; options such as `tiffLayers` need background mode.
+- In live mode, `doc_save` takes only `path` and `index`; options such as `tiffLayers` need background mode.
