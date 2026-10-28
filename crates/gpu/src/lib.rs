@@ -3128,6 +3128,21 @@ mod tests {
         }
     }
 
+    /// FXC, D3D12's default shader compiler, fails a function whose body ends in a switch
+    /// ("not all control paths return a value", X3507) even when every case returns, and then
+    /// the compositor doesn't build on Windows. naga accepts it, so check the parsed functions.
+    #[test]
+    fn no_function_ends_in_a_switch() {
+        use wgpu::naga::Statement;
+        let module = wgpu::naga::front::wgsl::parse_str(SHADER).unwrap_or_else(|e| panic!("{}", e.emit_to_string(SHADER)));
+        let functions = module.functions.iter().map(|(_, f)| f).chain(module.entry_points.iter().map(|ep| &ep.function));
+        let ending_in_switch: Vec<_> = functions
+            .filter(|f| f.result.is_some() && matches!(f.body.last(), Some(Statement::Switch { .. })))
+            .map(|f| f.name.clone().unwrap_or_default())
+            .collect();
+        assert!(ending_in_switch.is_empty(), "end these with a return after the switch: {ending_in_switch:?}");
+    }
+
     /// The decimal float literals in `src` (comments skipped; hex literals are exact, so skipped),
     /// with their line numbers.
     fn decimal_float_literals(src: &str) -> Vec<(usize, String)> {
