@@ -5,6 +5,8 @@
 //! (which closes idle control connections after
 //! [`IO_TIMEOUT`](crate::security::IO_TIMEOUT)) may already have closed it.
 
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -40,6 +42,51 @@ pub struct BridgeClient {
     next_id: AtomicU64,
     timeout: Duration,
     idle_reconnect: Duration,
+    launcher: Option<Launcher>,
+}
+
+/// How long a launched app gets to start listening before the call gives up.
+pub const LAUNCH_WAIT: Duration = Duration::from_secs(45);
+
+/// Starts the desktop app with control on when nothing listens at the bridge address
+/// (`photocraft-cli mcp --bridge … --launch`), so a call never fails just because the app was
+/// closed, or was opened without `--control`.
+pub struct Launcher {
+    program: PathBuf,
+    args: Vec<OsString>,
+    /// When the app was last started: a second call while it is still starting waits for that
+    /// one instead of opening another window.
+    started: std::sync::Mutex<Option<Instant>>,
+    wait: Duration,
+}
+
+impl Launcher {
+    pub fn new(program: impl Into<PathBuf>, args: Vec<OsString>) -> Self {
+        Launcher { program: program.into(), args, started: std::sync::Mutex::new(None), wait: LAUNCH_WAIT }
+    }
+
+    /// Shorten the wait for the app to listen; tests use it.
+    pub fn with_wait(mut self, wait: Duration) -> Self {
+        self.wait = wait;
+        self
+    }
+
+    /// Start the app unless it was started within the wait, which it may still be using.
+    fn start(&self) -> Result<(), String> {
+        let mut started = self.started.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if started.is_some_and(|at| at.elapsed() < self.wait) {
+            return Ok(());
+        }
+        std::process::Command::new(&self.program)
+            .args(&self.args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("cannot start {} ({e})", self.program.display()))?;
+        *started = Some(Instant::now());
+        Ok(())
+    }
 }
 
 impl BridgeClient {
@@ -60,7 +107,14 @@ impl BridgeClient {
             next_id: AtomicU64::new(1),
             timeout: DEFAULT_CALL_TIMEOUT,
             idle_reconnect: IDLE_RECONNECT,
+            launcher: None,
         })
+    }
+
+    /// Start the app with `launcher` when nothing listens at the address.
+    pub fn with_launcher(mut self, launcher: Launcher) -> Self {
+        self.launcher = Some(launcher);
+        self
     }
 
     pub fn with_timeout(mut self, t: Duration) -> Self {
@@ -126,15 +180,7 @@ impl BridgeClient {
             *guard = None;
         }
         if guard.is_none() {
-            let s = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&self.addr))
-                .await
-                .map_err(|_| Failure::NotSent(format!("timed out connecting to {}", self.addr)))?
-                .map_err(|e| {
-                    Failure::NotSent(format!(
-                        "cannot connect to {} ({e}); start the app with `photocraft --control <port>` and matching control credentials",
-                        self.addr
-                    ))
-                })?;
+            let s = self.connect().await?;
             let (r, w) = s.into_split();
             let mut conn = (BufReader::new(r), w);
             let auth_id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -182,6 +228,44 @@ impl BridgeClient {
             Err(_) => {
                 *guard = None;
                 Err(Failure::TimedOut(()))
+            }
+        }
+    }
+}
+
+impl BridgeClient {
+    /// A connection to the app, starting it first when a launcher is set and nothing listens.
+    async fn connect(&self) -> Result<TcpStream, Failure> {
+        let once = || async {
+            tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&self.addr))
+                .await
+                .map_err(|_| format!("timed out connecting to {}", self.addr))?
+                .map_err(|e| format!("cannot connect to {} ({e})", self.addr))
+        };
+        let first = match once().await {
+            Ok(s) => return Ok(s),
+            Err(e) => e,
+        };
+        let Some(launcher) = &self.launcher else {
+            return Err(Failure::NotSent(format!(
+                "{first}; start the app with `photocraft --control <port>` and matching control credentials, or give `photocraft-cli mcp` --launch"
+            )));
+        };
+        launcher.start().map_err(|e| Failure::NotSent(format!("{first}; {e}")))?;
+        let deadline = Instant::now() + launcher.wait;
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            match once().await {
+                Ok(s) => return Ok(s),
+                Err(e) if Instant::now() >= deadline => {
+                    return Err(Failure::NotSent(format!(
+                        "started {} but it did not listen on {} within {:?} ({e}); is Preferences › Integrations › Allow Agent Control on?",
+                        launcher.program.display(),
+                        self.addr,
+                        launcher.wait
+                    )));
+                }
+                Err(_) => {}
             }
         }
     }

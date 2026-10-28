@@ -219,6 +219,29 @@ pub struct ScreenshotParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct InkFromFileParams {
+    /// The mask image beneath the read root (PNG, TIFF, JPEG, … of the document's size): white is
+    /// ink unless `ink` says black; transparent is none.
+    pub path: String,
+    /// The spot channel to make or update: W1/W2 white, W3/W4 varnish (default W1).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// "white" (default) or "black": the image colour that means ink.
+    #[serde(default)]
+    pub ink: Option<String>,
+    /// Pixels to shrink the ink by (0-100).
+    #[serde(default)]
+    pub choke: Option<f64>,
+    /// Full ink where the mask is at least half on, none elsewhere (default true).
+    #[serde(default, rename = "hardEdges")]
+    pub hard_edges: Option<bool>,
+    /// Scale a mask of another size to the document (default false: refused).
+    #[serde(default)]
+    pub stretch: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SelectParams {
     pub index: usize,
 }
@@ -623,7 +646,7 @@ impl PhotocraftMcp {
         let Some(b) = self.bridge_client() else {
             return Ok(no_backend());
         };
-        to_result(b.call_read("ui.inspect", json!({})).await)
+        to_result(b.call_read("app.documents", json!({})).await)
     }
 
     #[tool(description = "Open an image or document file and make it active. Returns index, size and import warnings.")]
@@ -827,9 +850,19 @@ impl PhotocraftMcp {
     #[tool(description = "Render the flattened document and return it as a PNG image (bridge mode: window screenshot).")]
     async fn doc_render_preview(&self, Parameters(p): Parameters<PreviewParams>) -> Result<CallToolResult, McpError> {
         let max = p.max_side.unwrap_or(1024);
-        if let Some(r) = self.headless_op(move |h| h.render_png(p.index, max)).await {
+        if let Some(r) = self.headless_op(move |h| Ok((h.render_png(p.index, max)?, h.doc_size(p.index)?))).await {
             return Ok(match r {
-                Ok(png) => png_result(&png, format!("flattened preview (max side {max})")),
+                // The document's own size, so coordinates read off the preview can be scaled
+                // back to document pixels (Color Range points, selections, …).
+                Ok((png, (w, h))) => {
+                    let scale = f64::from(max) / f64::from(w.max(h).max(1));
+                    let note = if scale < 1.0 {
+                        format!("flattened preview of the {w} x {h} px document, scaled by {scale:.4}: divide preview coordinates by it for document pixels")
+                    } else {
+                        format!("flattened preview of the {w} x {h} px document at full size")
+                    };
+                    png_result(&png, note)
+                }
                 Err(e) => fail(e),
             });
         }
@@ -847,20 +880,66 @@ impl PhotocraftMcp {
         self.doc_render_preview(p).await
     }
 
-    #[tool(description = "Make the document at `index` active.")]
+    #[tool(description = "Make the document at `index` active (in the app: its tab). Returns the documents.")]
     async fn doc_select(&self, Parameters(p): Parameters<SelectParams>) -> Result<CallToolResult, McpError> {
-        match self.headless_op(move |h| h.select(p.index)).await {
-            Some(r) => to_result(r),
-            None => bridge_only_headless("doc_select"),
+        if let Some(r) = self.headless_op(move |h| h.select(p.index)).await {
+            return to_result(r);
         }
+        let Some(b) = self.bridge_client() else {
+            return Ok(no_backend());
+        };
+        to_result(b.call("app.select", json!({"index": p.index})).await)
     }
 
-    #[tool(description = "Close a document (default: the active one) without saving.")]
+    #[tool(description = "Close a document (default: the active one) without saving. Returns the documents left.")]
     async fn doc_close(&self, Parameters(p): Parameters<DocIndex>) -> Result<CallToolResult, McpError> {
-        match self.headless_op(move |h| h.close(p.index)).await {
-            Some(r) => to_result(r),
-            None => bridge_only_headless("doc_close"),
+        if let Some(r) = self.headless_op(move |h| h.close(p.index)).await {
+            return to_result(r);
         }
+        let Some(b) = self.bridge_client() else {
+            return Ok(no_backend());
+        };
+        let params = p.index.map_or_else(|| json!({}), |i| json!({"document": i}));
+        if let Err(e) = b.call("engine.execute", json!({"command": "file.close", "params": params})).await {
+            return Ok(fail(e));
+        }
+        to_result(b.call_read("app.documents", json!({})).await)
+    }
+
+    #[tool(
+        description = "Make or update a UV ink spot channel (W1/W2 white, W3/W4 varnish) from a mask image file beneath the read root, in one step: white in the image is ink (or black with `ink`), transparent none. The image must be the document's size unless `stretch`. Same result as channel.uvInk with source \"image\"."
+    )]
+    async fn channel_from_image(&self, Parameters(p): Parameters<InkFromFileParams>) -> Result<CallToolResult, McpError> {
+        let mut params = serde_json::Map::new();
+        if let Some(v) = p.name {
+            params.insert("name".into(), json!(v));
+        }
+        if let Some(v) = p.ink {
+            params.insert("ink".into(), json!(v));
+        }
+        if let Some(v) = p.choke {
+            params.insert("choke".into(), json!(v));
+        }
+        if let Some(v) = p.hard_edges {
+            params.insert("hardEdges".into(), json!(v));
+        }
+        if let Some(v) = p.stretch {
+            params.insert("stretch".into(), json!(v));
+        }
+        let params = Value::Object(params);
+        let path = p.path;
+        let (path2, params2) = (path.clone(), params.clone());
+        if let Some(r) = self.headless_op(move |h| h.uv_ink_from_file(&path2, params2)).await {
+            return to_result(r);
+        }
+        let Some(b) = self.bridge_client() else {
+            return Ok(no_backend());
+        };
+        let mut params = params;
+        if let Some(o) = params.as_object_mut() {
+            o.insert("path".into(), json!(path));
+        }
+        to_result(b.call("app.uvInkFromFile", params).await)
     }
 
     #[tool(description = "List engine commands. Returns a JSON array (no wrapper object) of {id, label, menu: [path], \
@@ -1021,10 +1100,6 @@ impl PhotocraftMcp {
     }
 }
 
-fn bridge_only_headless(name: &str) -> Result<CallToolResult, McpError> {
-    Ok(fail(format!("`{name}` is only available in headless mode (in the GUI use the window/tab UI or control_call)")))
-}
-
 impl PhotocraftMcp {
     async fn run_command(&self, id: String, params: Value, wait: bool) -> Result<CallToolResult, McpError> {
         let (id2, params2) = (id.clone(), params.clone());
@@ -1078,7 +1153,6 @@ impl PhotocraftMcp {
                 p.quality.is_some().then_some("quality"),
                 p.tiff_layers.then_some("tiffLayers"),
                 dpx_bits.is_some().then_some("dpxBits"),
-                p.index.is_some().then_some("index"),
             ]
             .into_iter()
             .flatten()
@@ -1089,6 +1163,10 @@ impl PhotocraftMcp {
             let mut params = json!({});
             if let Some(path) = p.path {
                 params["path"] = json!(path);
+            }
+            // The app saves its active document: `index` makes that one active first.
+            if let Some(index) = p.index {
+                params["document"] = json!(index);
             }
             if let Some(bits) = tga_bits {
                 params["tgaBits"] = json!(bits.bits());

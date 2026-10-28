@@ -3,11 +3,15 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use serde_json::Value;
 
-use photocraft_automation::{Headless, PhotocraftMcp, security};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use photocraft_automation::{Backend, BridgeClient, Headless, Launcher, PhotocraftMcp, security};
 
 use crate::{
     Result,
-    args::{CommandsArgs, McpArgs, ServeArgs},
+    args::{Bridge, CommandsArgs, McpArgs, ServeArgs},
     output::{JsonStyle, print_json},
 };
 
@@ -72,11 +76,49 @@ pub(crate) fn mcp(a: &McpArgs, err: &mut dyn Write) -> Result {
                     "photocraft-cli: PHOTOCRAFT_CONTROL_PORT is set; bridging to the app on {addr} instead of a headless engine (unset it to run headless)"
                 );
             }
-            let token = security::client_token(a.control.control_token.as_deref(), a.control.control_token_file.as_deref())?;
-            PhotocraftMcp::bridge(&addr.to_string(), &token)?
+            match (&a.launch, a.control.control_token_file.as_deref()) {
+                (Some(app), Some(token_file)) => {
+                    // The app this may start reads the token from the file, so create it now
+                    // when it is missing, as the app itself would.
+                    let token = security::server_token(None, Some(token_file))?;
+                    let launcher = launcher(Path::new(app), addr, token_file, a)?;
+                    PhotocraftMcp::with_backend(Backend::Bridge(Arc::new(BridgeClient::new(addr.to_string(), token)?.with_launcher(launcher))))
+                }
+                _ => {
+                    let token = security::client_token(a.control.control_token.as_deref(), a.control.control_token_file.as_deref())?;
+                    PhotocraftMcp::bridge(&addr.to_string(), &token)?
+                }
+            }
         }
         None => PhotocraftMcp::headless_with_workspace(a.automation.workspace()?),
     };
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     Ok(rt.block_on(server.serve_stdio())?)
+}
+
+/// `mcp --launch`: the app to start (`app`, or the `photocraft` beside this program when empty)
+/// and its options: control on the bridge's port, the token file and the automation roots.
+fn launcher(app: &Path, bridge: &Bridge, token_file: &Path, a: &McpArgs) -> Result<Launcher> {
+    let program = if app.as_os_str().is_empty() {
+        let exe = std::env::current_exe()?;
+        exe.with_file_name(format!("photocraft{}", std::env::consts::EXE_SUFFIX))
+    } else {
+        app.to_path_buf()
+    };
+    let port = match bridge {
+        Bridge::Port(port) => *port,
+        Bridge::Addr(addr) => addr.rsplit_once(':').and_then(|(_, p)| p.parse().ok()).unwrap_or(0),
+    };
+    if port == 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("--launch needs a port to start the app on, not `{bridge}`")).into());
+    }
+    let absolute = |p: &Path| -> std::io::Result<PathBuf> { std::path::absolute(p) };
+    let mut args: Vec<OsString> = vec!["--control".into(), port.to_string().into(), "--control-token-file".into(), absolute(token_file)?.into()];
+    if let Some(root) = &a.automation.automation_read_root {
+        args.extend(["--automation-read-root".into(), absolute(root)?.into()]);
+    }
+    if let Some(root) = &a.automation.automation_write_root {
+        args.extend(["--automation-write-root".into(), absolute(root)?.into()]);
+    }
+    Ok(Launcher::new(program, args))
 }

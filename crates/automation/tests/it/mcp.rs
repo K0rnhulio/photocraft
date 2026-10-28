@@ -90,6 +90,7 @@ async fn lists_expected_tools() {
         "doc_render_preview",
         "doc_select",
         "doc_close",
+        "channel_from_image",
         "command_list",
         "command_run",
         "command_batch",
@@ -346,17 +347,12 @@ async fn preview_budget_failure_preserves_the_mcp_session() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bridge_doc_save_rejects_headless_only_options_instead_of_saving_with_defaults() {
-    // Bridge mode forwards only the path to the running app: quality/format/tiffLayers/index
-    // must be refused up front (no bridge connection needed for that) rather than silently
+    // Bridge mode forwards only the path (and document index) to the running app:
+    // quality/format/tiffLayers must be refused up front (no bridge connection needed for that) rather than silently
     // saving with the app's current settings.
     let server = PhotocraftMcp::bridge("127.0.0.1:1", &"a".repeat(64)).unwrap();
     let client = connect(server).await;
-    for params in [
-        json!({"path": "out.jpg", "quality": 50}),
-        json!({"path": "out.png", "format": "png"}),
-        json!({"path": "out.tif", "tiffLayers": true}),
-        json!({"path": "out.pcraft", "index": 0}),
-    ] {
+    for params in [json!({"path": "out.jpg", "quality": 50}), json!({"path": "out.png", "format": "png"}), json!({"path": "out.tif", "tiffLayers": true})] {
         let r = call(&client, "doc_save", params.clone()).await;
         assert_eq!(r.is_error, Some(true), "{params}: {:?}", text(&r));
         assert!(text(&r).contains("headless"), "{params}: {}", text(&r));
@@ -935,6 +931,8 @@ async fn fake_app_with_screenshot(screenshot_png: Option<Vec<u8>>) -> (String, t
                     json!({"id": id, "ok": true, "result": {"ran": req["params"]["command"], "params": req["params"]["params"], "wait": req["params"]["wait"]}})
                 }
                 "app.save" => json!({"id": id, "ok": true, "result": {"saved": req["params"]}}),
+                "app.documents" => json!({"id": id, "ok": true, "result": {"active": 0, "documents": [{"index": 0, "name": "a"}]}}),
+                "app.select" | "app.uvInkFromFile" => json!({"id": id, "ok": true, "result": {"method": method, "params": req["params"]}}),
                 "engine.commands" => {
                     json!({"id": id, "ok": true, "result": [{"id": "file.new", "label": "New…", "enabled": true}]})
                 }
@@ -980,11 +978,23 @@ async fn bridge_forwards_to_control_protocol() {
     let e = call(&client, "control_call", json!({"method": "bogus.method"})).await;
     assert_eq!(e.is_error, Some(true));
     assert!(text(&e).contains("unknown tool"));
-    let r = call(&client, "doc_select", json!({"index": 0})).await;
-    assert_eq!(r.is_error, Some(true));
+    // Document tools work in the app window too, and session_list is the short list.
+    let r = json_of(&call(&client, "doc_select", json!({"index": 1})).await);
+    assert_eq!((r["method"].clone(), r["params"].clone()), (json!("app.select"), json!({"index": 1})));
+    let r = json_of(&call(&client, "doc_close", json!({"index": 1})).await);
+    assert_eq!(r["documents"][0]["name"], "a", "doc_close returns the documents left: {r}");
+    let r = json_of(&call(&client, "session_list", json!({})).await);
+    assert_eq!(r["active"], 0);
+    let r = json_of(&call(&client, "doc_export", json!({"path": "out/p.tif", "index": 2})).await);
+    assert_eq!(r["saved"], json!({"path": "out/p.tif", "document": 2}));
+    let r = json_of(&call(&client, "channel_from_image", json!({"path": "w3.png", "name": "W3", "ink": "black"})).await);
+    assert_eq!(r["method"], "app.uvInkFromFile");
+    assert_eq!(r["params"], json!({"path": "w3.png", "name": "W3", "ink": "black"}));
 
     client.cancel().await.unwrap();
-    app.abort();
+    let seen = app.await.unwrap_or_default();
+    let close = seen.iter().find(|r| r["method"] == "engine.execute" && r["params"]["command"] == "file.close").expect("file.close sent");
+    assert_eq!(close["params"]["params"], json!({"document": 1}));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1391,5 +1401,70 @@ async fn convention_resources_are_live_json() {
     assert!(client.read_resource(rmcp::model::ReadResourceRequestParams::new("photocraft://missing")).await.is_err());
     let preview = call(&client, "render_preview", json!({"max_side":4})).await;
     assert!(preview.content.iter().any(|c| c.as_image().is_some()));
+    client.cancel().await.unwrap();
+}
+
+/// A one-connection control server on `port` that starts listening after `delay`: authenticates
+/// and answers `app.documents`.
+fn late_app(port: u16, delay: std::time::Duration) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+        let (sock, _) = listener.accept().await.unwrap();
+        let (r, mut w) = sock.into_split();
+        let mut lines = BufReader::new(r).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let req: Value = serde_json::from_str(&line).unwrap();
+            let result = match req["method"].as_str() {
+                Some("auth") => json!({"authenticated": true}),
+                _ => json!({"active": null, "documents": []}),
+            };
+            w.write_all(format!("{}\n", json!({"id": req["id"], "ok": true, "result": result})).as_bytes()).await.unwrap();
+        }
+    })
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_launches_the_app_when_nothing_listens() {
+    use photocraft_automation::{Backend, BridgeClient, Launcher};
+    use std::time::Duration;
+
+    let port = free_port();
+    let app = late_app(port, Duration::from_millis(400));
+    // A harmless program stands in for the app: this test binary, running no tests.
+    let program = std::env::current_exe().unwrap();
+    let launcher = Launcher::new(program, vec!["--exact".into(), "no_such_test".into()]).with_wait(Duration::from_secs(20));
+    let bridge = BridgeClient::new(format!("127.0.0.1:{port}"), CONTROL_TOKEN).unwrap().with_launcher(launcher);
+    let client = connect(PhotocraftMcp::with_backend(Backend::Bridge(std::sync::Arc::new(bridge)))).await;
+    let r = call(&client, "session_list", json!({})).await;
+    assert_ne!(r.is_error, Some(true), "{}", text(&r));
+    assert_eq!(json_of(&r)["documents"], json!([]));
+    client.cancel().await.unwrap();
+    app.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bridge_launch_failures_say_what_went_wrong() {
+    use photocraft_automation::{Backend, BridgeClient, Launcher};
+    use std::time::Duration;
+
+    let port = free_port();
+    let missing = Launcher::new("/no/such/photocraft-app", Vec::new());
+    let bridge = BridgeClient::new(format!("127.0.0.1:{port}"), CONTROL_TOKEN).unwrap().with_launcher(missing);
+    let client = connect(PhotocraftMcp::with_backend(Backend::Bridge(std::sync::Arc::new(bridge)))).await;
+    let r = call(&client, "session_list", json!({})).await;
+    assert!(text(&r).contains("cannot start /no/such/photocraft-app"), "{}", text(&r));
+    client.cancel().await.unwrap();
+
+    // Started, but nothing ever listens.
+    let quiet = Launcher::new(std::env::current_exe().unwrap(), vec!["--exact".into(), "no_such_test".into()]).with_wait(Duration::from_millis(600));
+    let bridge = BridgeClient::new(format!("127.0.0.1:{port}"), CONTROL_TOKEN).unwrap().with_launcher(quiet);
+    let client = connect(PhotocraftMcp::with_backend(Backend::Bridge(std::sync::Arc::new(bridge)))).await;
+    let r = call(&client, "session_list", json!({})).await;
+    assert!(text(&r).contains("did not listen"), "{}", text(&r));
     client.cancel().await.unwrap();
 }

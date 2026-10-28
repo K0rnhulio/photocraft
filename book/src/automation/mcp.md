@@ -22,7 +22,7 @@ photocraft-cli mcp --bridge 127.0.0.1:7878 --control-token-file /private/path/co
 
 Use absolute root paths in MCP client configurations, since a relative root is resolved from the
 client's launch directory. In bridge mode the roots are configured on the desktop app, and root
-flags on `photocraft-cli mcp --bridge` are rejected. Explicit `--control-token` and
+flags on `photocraft-cli mcp --bridge` are rejected, except with `--launch`: then the bridge starts the app (`--launch` alone: the `photocraft` next to the CLI; `--launch <APP>`: that program) with control on, the `--control-token-file` token and those roots whenever nothing listens on the port, and waits for it. Explicit `--control-token` and
 `--control-token-file` flags require `--bridge` (or `PHOTOCRAFT_CONTROL_PORT`) and are mutually
 exclusive; bridge credentials can also come from `PHOTOCRAFT_CONTROL_TOKEN` or
 `PHOTOCRAFT_CONTROL_TOKEN_FILE`. Each launch option

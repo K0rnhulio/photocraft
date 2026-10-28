@@ -64,6 +64,13 @@ impl Headless {
         self.session.poll_jobs();
     }
 
+    /// The pixel size of document `index` (the active one when `None`).
+    pub fn doc_size(&self, index: Option<usize>) -> Result<(u32, u32), AutomationError> {
+        let i = self.doc_index(index)?;
+        let d = self.session.documents().get(i).ok_or_else(|| AutomationError::BadRequest(format!("no document at index {i}")))?;
+        Ok((d.doc.size.width, d.doc.size.height))
+    }
+
     fn doc_index(&self, index: Option<usize>) -> Result<usize, AutomationError> {
         match index {
             Some(i) if i < self.session.documents().len() => Ok(i),
@@ -343,6 +350,22 @@ impl Headless {
             crate::budgets::check_png(png.len())?;
         }
         Ok(png)
+    }
+
+    /// Channels › UV Ink Channel from the mask image file at `path` (see `channel.uvInk`'s
+    /// `"source": "image"`): read through the granted read root, passed to the engine as bytes.
+    pub fn uv_ink_from_file(&mut self, path: &str, mut params: Value) -> Result<Value, AutomationError> {
+        let bytes = match &self.filesystem {
+            Filesystem::Denied => return Err(AutomationError::BadRequest("automation filesystem access is not granted: read authority is absent".into())),
+            Filesystem::TrustedLocal => std::fs::read(path).map_err(|e| AutomationError::Io(format!("{path}: {e}")))?,
+            Filesystem::Workspace(workspace) => workspace.read(path)?,
+        };
+        let Some(o) = params.as_object_mut() else {
+            return Err(AutomationError::BadRequest("params must be a JSON object".into()));
+        };
+        o.insert("source".into(), json!("image"));
+        o.insert("image".into(), json!(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)));
+        self.command_start("channel.uvInk", params, true)
     }
 
     pub fn session_list(&self) -> Value {

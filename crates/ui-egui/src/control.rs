@@ -1393,8 +1393,53 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
             }
             None => err("missing `path`"),
         },
+        // The open documents, without the rest of `ui.inspect`.
+        "app.documents" => ok(photocraft_engine::inspect::session(&app.session)),
+        "app.select" => match u("index").and_then(|i| usize::try_from(i).ok()) {
+            Some(i) if app.session.set_active(i) => {
+                // As a click on its tab: the document, not an opening tab's progress.
+                app.jobs.focus = None;
+                ok(photocraft_engine::inspect::session(&app.session))
+            }
+            Some(i) => err(format!("no document at index {i}")),
+            None => err("missing `index`"),
+        },
+        // Channels › UV Ink Channel from a mask image file beneath the read root: the app reads
+        // the file, so the engine command gets its bytes and never a path.
+        "app.uvInkFromFile" => {
+            let Some(path) = s("path") else { return err("missing `path`") };
+            let read = match app.services.automation_read.as_mut() {
+                Some(read) => read(path),
+                None => Err("automation read authority is not configured".into()),
+            };
+            let (_, bytes) = match read {
+                Ok(file) => file,
+                Err(e) => return err(e),
+            };
+            let mut params = p.clone();
+            if let Some(o) = params.as_object_mut() {
+                o.remove("path");
+                o.remove("wait");
+                o.insert("source".into(), json!("image"));
+                o.insert("image".into(), json!(base64::engine::general_purpose::STANDARD.encode(&bytes)));
+            }
+            if let Some(authorize) = app.services.automation_command.as_ref()
+                && let Err(error) = authorize("channel.uvInk", &params)
+            {
+                return err(error);
+            }
+            run_waiting(app, wait, |app| app.run("channel.uvInk", params))
+        }
         "app.save" => match crate::FormatChoices::from_params(p, "app.save") {
             Ok(choices) => {
+                // `document`: save that one, which becomes the active document (as a click on
+                // its tab, then File › Save As).
+                if let Some(v) = p.get("document").filter(|v| !v.is_null()) {
+                    match v.as_u64().and_then(|i| usize::try_from(i).ok()) {
+                        Some(i) if app.session.set_active(i) => app.jobs.focus = None,
+                        _ => return err(format!("no document at index {v}")),
+                    }
+                }
                 let path = s("path").map(str::to_string);
                 run_waiting(app, p.get("wait").and_then(Value::as_bool).unwrap_or(true), move |app| app.save_automation_with(path, choices))
             }
@@ -2870,6 +2915,42 @@ mod tests {
         assert_eq!(app.session.active().unwrap().path, None);
         let r = call(&mut app, &ctx, "app.save", json!({}));
         assert!(r["error"].as_str().unwrap().contains("pass `path`"), "{r}");
+    }
+
+    #[test]
+    fn documents_select_close_and_uv_ink_from_a_file_work_in_the_window() {
+        // An 8 x 8 mask, white on its left half.
+        let px: Vec<u8> = (0..64).map(|i| if i % 8 < 4 { 255 } else { 0 }).collect();
+        let img = photocraft_codecs::Image::from_u8(8, 8, photocraft_codecs::ChannelLayout::Gray, px).unwrap();
+        let png = photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &Default::default()).unwrap();
+        let services = crate::Services {
+            automation_read: Some(Box::new(
+                move |path: &str| if path == "masks/w1.png" { Ok(("w1.png".into(), png.clone())) } else { Err(format!("{path}: not found")) },
+            )),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        let ctx = egui::Context::default();
+        app.run("file.new", json!({"width": 8, "height": 8, "name": "A"})).unwrap();
+        app.run("file.new", json!({"width": 8, "height": 8, "name": "B"})).unwrap();
+        let r = call(&mut app, &ctx, "app.documents", json!({}));
+        assert_eq!((r["result"]["active"].clone(), r["result"]["documents"].as_array().map(Vec::len)), (json!(1), Some(2)), "{r}");
+        let r = call(&mut app, &ctx, "app.select", json!({"index": 0}));
+        assert_eq!(r["result"]["active"], 0, "{r}");
+        assert_eq!(app.session.active_index(), Some(0));
+        assert!(call(&mut app, &ctx, "app.select", json!({"index": 7}))["error"].as_str().unwrap().contains("no document at index 7"));
+        assert!(call(&mut app, &ctx, "app.select", json!({}))["error"].as_str().unwrap().contains("index"));
+        // The mask lands in document A, read by the app, never passed as a path to the engine.
+        let r = call(&mut app, &ctx, "app.uvInkFromFile", json!({"path": "masks/w1.png", "name": "W1"}));
+        assert_eq!((r["result"]["name"].clone(), r["result"]["source"].clone()), (json!("W1"), json!("image")), "{r}");
+        let ch = &app.session.active().unwrap().doc.channels[0];
+        assert_eq!((ch.name.as_str(), ch.surface.sample_channel(1, 1, 0), ch.surface.sample_channel(6, 1, 0)), ("W1", 1.0, 0.0));
+        assert!(call(&mut app, &ctx, "app.uvInkFromFile", json!({"path": "masks/none.png"}))["error"].as_str().unwrap().contains("not found"));
+        assert!(call(&mut app, &ctx, "app.uvInkFromFile", json!({}))["error"].as_str().unwrap().contains("path"));
+        // Close B by index without a prompt, and a save of a missing document is refused.
+        call(&mut app, &ctx, "engine.execute", json!({"command": "file.close", "params": {"document": 1}}));
+        assert_eq!(app.session.documents().len(), 1);
+        assert!(call(&mut app, &ctx, "app.save", json!({"path": "x.png", "document": 5}))["error"].as_str().unwrap().contains("no document at index 5"));
     }
 
     fn deny_ambient_file(id: &str, _: &serde_json::Value) -> photocraft_engine::Result<()> {

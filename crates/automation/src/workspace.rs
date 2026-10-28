@@ -81,7 +81,7 @@ impl AuthorizedWorkspace {
     /// step is tracked in #4963, and the Windows `ReplaceFileW` swap is path-based, which this
     /// path may not use.
     ///
-    /// The parent directory must already exist. `cap-std` performs path
+    /// Missing parent folders are created inside the root. `cap-std` performs path
     /// resolution and file creation relative to the held directory handle, so
     /// a non-existent final target is supported without ambient path access.
     pub fn write(&self, path: &str, bytes: &[u8]) -> Result<(), AutomationError> {
@@ -90,6 +90,11 @@ impl AuthorizedWorkspace {
         let leaf = relative.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let parent = relative.parent().map(Path::to_path_buf).unwrap_or_default();
         let tmp = parent.join(photocraft_format::atomic::temp_name(&leaf));
+        // Folders the path names that don't exist yet are made, inside the root only: the held
+        // directory handle resolves them, so `..` or a symlink can't lead out of it.
+        if !parent.as_os_str().is_empty() {
+            root.dir.create_dir_all(&parent).map_err(|e| file_error("mkdir", path, e))?;
+        }
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         let written = root.dir.open_with(&tmp, &options).and_then(|file| {
@@ -690,11 +695,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_parent_is_a_stable_error_before_any_file_is_created() {
-        let (inside, _, workspace) = roots("missing-parent");
-        let error = workspace.write("missing/output.txt", b"x").unwrap_err().to_string();
-        assert!(error.contains("automation write"), "{error}");
-        assert!(!inside.join("missing").exists());
+    fn missing_parent_folders_are_created_inside_the_root() {
+        let (inside, outside, workspace) = roots("missing-parent");
+        workspace.write("jobs/anna/print.tif", b"x").unwrap();
+        assert_eq!(std::fs::read(inside.join("jobs/anna/print.tif")).unwrap(), b"x");
+        // Still only beneath the root: `..` is refused before any folder is made.
+        assert!(workspace.write("new/../../escape/out.txt", b"x").is_err());
+        assert!(!outside.join("escape").exists());
+        assert!(!inside.join("new").exists());
     }
 
     #[cfg(unix)]

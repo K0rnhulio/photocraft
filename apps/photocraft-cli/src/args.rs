@@ -212,6 +212,11 @@ pub(crate) struct McpArgs {
     /// `--bridge` came from PHOTOCRAFT_CONTROL_PORT, set by [`parse`].
     #[arg(skip)]
     pub(crate) bridge_from_env: bool,
+    /// With --bridge: when nothing listens there, start the PhotoCraft app (this path, or the
+    /// `photocraft` next to this program) with control on, the --control-token-file token and
+    /// the automation roots given here, and wait for it
+    #[arg(long, value_name = "APP", num_args = 0..=1, default_missing_value = "", value_parser = clap::builder::OsStringValueParser::new())]
+    pub(crate) launch: Option<std::ffi::OsString>,
     #[command(flatten)]
     pub(crate) control: ControlArgs,
     #[command(flatten)]
@@ -269,6 +274,9 @@ enum ServerOptionError {
     /// authority the bridge can't give (#8035).
     #[error("configure automation roots on the desktop app; --automation-read-root and --automation-write-root require headless MCP mode")]
     BridgeRoots,
+    /// --launch starts the app for the bridge, which must find its token in a file.
+    #[error("--launch requires --bridge and --control-token-file")]
+    LaunchNeedsBridge,
     /// A token flag without the bridge or port that reads it would be ignored (#8035).
     #[error("{flag} requires {transport}")]
     NeedsTransport { flag: &'static str, transport: &'static str },
@@ -279,6 +287,7 @@ impl ServerOptionError {
         let kind = match self {
             Self::BridgeVar(_) => ErrorKind::ValueValidation,
             Self::BridgeRoots => ErrorKind::ArgumentConflict,
+            Self::LaunchNeedsBridge => ErrorKind::MissingRequiredArgument,
             Self::NeedsTransport { .. } => ErrorKind::MissingRequiredArgument,
         };
         cmd.error(kind, self)
@@ -395,7 +404,11 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Cli, clap::Error> {
                     conflict(sub, m, "automation_read_root", "bridge")?;
                     conflict(sub, m, "automation_write_root", "bridge")?;
                 }
-                if a.bridge.is_some() && (a.automation.automation_read_root.is_some() || a.automation.automation_write_root.is_some()) {
+                if a.launch.is_some() && (a.bridge.is_none() || a.control.control_token_file.is_none()) {
+                    return Err(ServerOptionError::LaunchNeedsBridge.into_clap(sub));
+                }
+                // With --launch the roots go to the app this starts.
+                if a.bridge.is_some() && a.launch.is_none() && (a.automation.automation_read_root.is_some() || a.automation.automation_write_root.is_some()) {
                     return Err(ServerOptionError::BridgeRoots.into_clap(sub));
                 }
                 check_server(sub, m, a.bridge.is_some(), "--bridge")?;

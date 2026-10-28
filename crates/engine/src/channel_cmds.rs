@@ -1297,7 +1297,8 @@ fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
         None | Some(Some("auto")) => "auto",
         Some(Some("selection")) => "selection",
         Some(Some("artwork")) => "artwork",
-        _ => return Err(bad(cmd, "`source` must be \"auto\", \"selection\" or \"artwork\"")),
+        Some(Some("image")) => "image",
+        _ => return Err(bad(cmd, "`source` must be \"auto\", \"selection\", \"artwork\" or \"image\"")),
     };
     let choke = match p.get("choke") {
         None | Some(Value::Null) => 0.0,
@@ -1321,6 +1322,7 @@ fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(cmd, "the image is too large for a UV ink channel"));
     }
     let use_selection = match source {
+        "image" => false,
         "selection" => {
             if doc.selection.is_none() {
                 return Err(bad(cmd, "make a selection first (or use source \"artwork\")"));
@@ -1330,7 +1332,9 @@ fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
         "artwork" => false,
         _ => doc.selection.is_some(),
     };
-    let mut mask = if use_selection {
+    let mut mask = if source == "image" {
+        image_mask(cmd, p, area)?
+    } else if use_selection {
         sel::mask_from_surface(doc.selection.as_ref(), area)
     } else {
         // The artwork's own shape: the merged alpha of the visible layers without the Background.
@@ -1349,8 +1353,11 @@ fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     if mask.iter().all(|v| *v <= 0.0) {
-        let why =
-            if use_selection { "the selection leaves nothing to put ink under" } else { "there is no artwork to put ink under: every layer is transparent" };
+        let why = match source {
+            "image" => "the image has no ink in it: check `ink` (which colour of the image means ink)",
+            _ if use_selection => "the selection leaves nothing to put ink under",
+            _ => "there is no artwork to put ink under: every layer is transparent",
+        };
         return Err(bad(cmd, if choke > 0.0 { format!("{why} after the choke") } else { why.to_string() }));
     }
     let (i, updated) = s.edit("UV Ink Channel", |doc, _| {
@@ -1372,7 +1379,63 @@ fn uv_ink_channel(s: &mut Session, p: &Value) -> Result<Value> {
         st.channel_view.set_alpha_visible(i, true);
         touch(st);
     }
-    Ok(json!({ "channel": i, "name": name, "updated": updated, "source": if use_selection { "selection" } else { "artwork" } }))
+    let source = match source {
+        "image" => "image",
+        _ if use_selection => "selection",
+        _ => "artwork",
+    };
+    Ok(json!({ "channel": i, "name": name, "updated": updated, "source": source }))
+}
+
+/// The largest mask image `channel.uvInk` decodes, in pixels (an 8-bit RGBA copy is held).
+const MAX_INK_IMAGE_PIXELS: u64 = 1 << 28;
+
+/// The ink plane (0..1 per canvas pixel) of the mask image in `p["image"]` (base64 file bytes, any
+/// format PhotoCraft opens): its white (or with `"ink": "black"` its black) is ink, and transparent
+/// pixels are none. It must be the canvas's size unless `stretch` scales it to fit.
+fn image_mask(cmd: &str, p: &Value, area: Rect) -> Result<Vec<f32>> {
+    let data = p.get("image").and_then(Value::as_str).ok_or_else(|| bad(cmd, "source \"image\" needs `image`: the image file's bytes as base64"))?;
+    let bytes = crate::plugin_cmds::b64_decode(data).ok_or_else(|| bad(cmd, "`image` is not valid base64"))?;
+    let white = match p.get("ink").map(Value::as_str) {
+        None | Some(Some("white")) => true,
+        Some(Some("black")) => false,
+        _ => return Err(bad(cmd, "`ink` must be \"white\" or \"black\" (the colour of the image that means ink)")),
+    };
+    let stretch = match p.get("stretch") {
+        None | Some(Value::Null) => false,
+        Some(v) => v.as_bool().ok_or_else(|| bad(cmd, "`stretch` must be true or false"))?,
+    };
+    let img = photocraft_codecs::decode(&bytes).map_err(|e| bad(cmd, format!("`image` could not be read: {e}")))?;
+    let (iw, ih) = (img.width(), img.height());
+    if u64::from(iw) * u64::from(ih) > MAX_INK_IMAGE_PIXELS {
+        return Err(bad(cmd, format!("the image ({iw} x {ih} px) is too large")));
+    }
+    let (w, h) = (area.width(), area.height());
+    if (iw, ih) != (w, h) && !stretch {
+        return Err(bad(
+            cmd,
+            format!("the image is {iw} x {ih} px but the document is {w} x {h} px: use an image of the document's size, or pass \"stretch\": true"),
+        ));
+    }
+    let px = img.to_rgba8();
+    let ink = |i: usize| -> f32 {
+        let Some(q) = px.get(i * 4..i * 4 + 4) else { return 0.0 };
+        let lum = (0.2126 * f32::from(q[0]) + 0.7152 * f32::from(q[1]) + 0.0722 * f32::from(q[2])) / 255.0;
+        let a = f32::from(q[3]) / 255.0;
+        (if white { lum } else { 1.0 - lum }) * a
+    };
+    let (iw, ih) = (iw.max(1) as usize, ih.max(1) as usize);
+    let (w, h) = (w as usize, h as usize);
+    let mut mask = Vec::with_capacity(w.saturating_mul(h));
+    for y in 0..h {
+        // Nearest pixel: a mask's edges stay as hard as they were drawn.
+        let sy = (y * ih / h.max(1)).min(ih - 1);
+        for x in 0..w {
+            let sx = (x * iw / w.max(1)).min(iw - 1);
+            mask.push(ink(sy * iw + sx));
+        }
+    }
+    Ok(mask)
 }
 
 fn duplicate_channel(s: &mut Session, p: &Value) -> Result<Value> {
@@ -2123,7 +2186,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "UV Ink Channel…",
             [],
             None,
-            r##"{"name":str="W1" (MainTop: W1/W2 white, W3/W4 varnish),"source":"auto|selection|artwork"="auto" (auto: the selection, or the non-transparent artwork without one),"choke":0..100=0 (pixels to shrink the ink by),"hardEdges":bool=true (full ink where at least half selected, none elsewhere; false keeps soft edges as partial ink),"color":"#rrggbb"?=white, pale yellow for varnish,"solidity":0..100?=0} (creates, or updates in place, a white underbase or varnish spot channel for UV printing)"##,
+            r##"{"name":str="W1" (MainTop: W1/W2 white, W3/W4 varnish),"source":"auto|selection|artwork|image"="auto" (auto: the selection, or the non-transparent artwork without one; image: a mask image),"image":base64? (source image: the mask image file's bytes, any format PhotoCraft opens, the document's size),"ink":"white|black"="white" (source image: the image colour that means ink; transparent is none),"stretch":bool=false (source image: scale an image of another size to the document),"choke":0..100=0 (pixels to shrink the ink by),"hardEdges":bool=true (full ink where at least half selected, none elsewhere; false keeps soft edges as partial ink),"color":"#rrggbb"?=white, pale yellow for varnish,"solidity":0..100?=0} (creates, or updates in place, a white underbase or varnish spot channel for UV printing)"##,
             has_doc,
             uv_ink_channel
         ),
