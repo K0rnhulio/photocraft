@@ -81,6 +81,7 @@ fn driver_ticket(device: &PrinterDevice, job: &Job, sheet: (f64, f64), landscape
             height: m.size().height_in_micron(),
             name: m.display_name(),
             keyword: m.option().name.as_ref().is_some_and(|n| n.namespace_ref() == Some(NS_PSK)),
+            option: m.option().name.as_ref().and_then(|n| Some((n.namespace_ref()?, n.local_name.as_str()))),
         })
         .collect();
     let media = ticket::matching_paper(&papers, sheet.0, sheet.1).and_then(|i| medias.get(i));
@@ -114,7 +115,7 @@ fn driver_ticket(device: &PrinterDevice, job: &Job, sheet: (f64, f64), landscape
     builder.merge(PrintTicket::from(document)).map_err(spool_error)?;
     let validated = builder.build().map_err(spool_error)?;
     let xml = std::str::from_utf8(validated.get_xml()).map_err(spool_error)?;
-    let paper = ticket::verify_ticket(xml, wanted, landscape)?;
+    let paper = ticket::verify_ticket(xml, wanted, &papers, landscape)?;
     Ok((validated, paper))
 }
 

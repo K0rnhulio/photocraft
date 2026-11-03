@@ -97,14 +97,15 @@ pub(crate) fn names_paper(display: Option<&str>, name: &str) -> bool {
 }
 
 /// A driver paper offered for the job: its size in micrometres (as the driver lists it), its
-/// display name, and whether its option is a Print Schema keyword (`psk:ISOA4`) rather than a
-/// vendor's own.
+/// display name, whether its option is a Print Schema keyword (`psk:ISOA4`) rather than a
+/// vendor's own, and that option's name as (namespace URI, local name).
 #[derive(Clone)]
 pub(crate) struct Paper<'a> {
     pub width: u32,
     pub height: u32,
     pub name: Option<&'a str>,
     pub keyword: bool,
+    pub option: Option<(&'a str, &'a str)>,
 }
 
 /// The driver paper for a sheet of `width` × `height` points (either way round): within a
@@ -141,17 +142,52 @@ fn integer(node: roxmltree::Node<'_, '_>, tag: &str, name: &str) -> Option<u32> 
         .and_then(|v| v.trim().parse::<u32>().ok())
 }
 
+/// An element's `name` attribute as (namespace URI, local name), its prefix resolved.
+fn qualified<'a>(node: roxmltree::Node<'a, '_>) -> Option<(&'a str, &'a str)> {
+    let (prefix, local) = node.attribute("name")?.split_once(':')?;
+    Some((node.lookup_namespace_uri(Some(prefix))?, local))
+}
+
+/// One dimension of the ticket's paper: the option's own value, or, for a custom size, the
+/// ParameterInit its ParameterRef names (`psk:PageMediaSizeMediaSizeWidth`).
+fn media_dimension(root: roxmltree::Node<'_, '_>, media: roxmltree::Node<'_, '_>, name: &str) -> Option<u32> {
+    let property =
+        media.descendants().find(|n| (n.has_tag_name((NS_PSF, "ScoredProperty")) || n.has_tag_name((NS_PSF, "Property"))) && named(*n, name))?;
+    if let Some(value) = property.children().find(|v| v.has_tag_name((NS_PSF, "Value"))) {
+        return value.text().and_then(|v| v.trim().parse::<u32>().ok());
+    }
+    let parameter = property.children().find(|v| v.has_tag_name((NS_PSF, "ParameterRef"))).and_then(qualified)?;
+    root.children()
+        .find(|n| n.has_tag_name((NS_PSF, "ParameterInit")) && qualified(*n) == Some(parameter))
+        .and_then(|n| n.children().find(|v| v.has_tag_name((NS_PSF, "Value"))))
+        .and_then(|n| n.text())
+        .and_then(|v| v.trim().parse::<u32>().ok())
+}
+
+/// The size, in micrometres, of the paper the validated ticket chose. Its own width and height
+/// when it states them; otherwise the size the driver's PrintCapabilities give the option the
+/// ticket names. Some drivers (Epson's WF-C5390, among others) return the chosen paper as a bare
+/// option name, its size only in their capabilities. `None` for a paper without a size (a roll).
+fn ticket_paper_size(root: roxmltree::Node<'_, '_>, media: roxmltree::Node<'_, '_>, papers: &[Paper<'_>]) -> Option<(u32, u32)> {
+    let positive = |(w, h): &(u32, u32)| *w > 0 && *h > 0;
+    let stated = media_dimension(root, media, "MediaSizeWidth").zip(media_dimension(root, media, "MediaSizeHeight"));
+    if let Some(size) = stated.filter(positive) {
+        return Some(size);
+    }
+    let option = media.children().find(|n| n.has_tag_name((NS_PSF, "Option"))).and_then(qualified)?;
+    papers.iter().find(|p| p.option == Some(option)).map(|p| (p.width, p.height)).filter(positive)
+}
+
 /// Check the driver's validated ticket: it kept the orientation, added no scaling and has a
 /// paper (when `paper` is given, that one, to a quarter of a millimetre). Returns the paper's
-/// width and height in micrometres as the driver lists it. Only those schema fields are read:
+/// width and height in micrometres as the driver lists it; a paper the ticket only names is
+/// looked up in `papers`, the driver's PrintCapabilities. Only those schema fields are read:
 /// some drivers return empty vendor parameters that a stricter parser would refuse.
-pub(crate) fn verify_ticket(xml: &str, paper: Option<(u32, u32)>, landscape: bool) -> Result<(u32, u32), Error> {
+pub(crate) fn verify_ticket(xml: &str, paper: Option<(u32, u32)>, papers: &[Paper<'_>], landscape: bool) -> Result<(u32, u32), Error> {
     let document = roxmltree::Document::parse(xml).map_err(spool_error)?;
     let feature = |name: &str| document.root_element().children().find(|n| n.has_tag_name((NS_PSF, "Feature")) && named(*n, name));
     let media = feature("PageMediaSize").ok_or_else(|| spool_error("the printer's driver did not confirm the paper size; nothing was sent"))?;
-    let size = integer(media, "ScoredProperty", "MediaSizeWidth")
-        .zip(integer(media, "ScoredProperty", "MediaSizeHeight"))
-        .filter(|(w, h)| *w > 0 && *h > 0)
+    let size = ticket_paper_size(document.root_element(), media, papers)
         .ok_or_else(|| spool_error("the printer's driver gave a paper without a size (a roll?); nothing was sent"))?;
     if let Some((w, h)) = paper {
         let same = |a: (u32, u32), b: (u32, u32)| a.0.abs_diff(b.0) <= PAPER_TOLERANCE && a.1.abs_diff(b.1) <= PAPER_TOLERANCE;
@@ -384,16 +420,63 @@ mod tests {
     fn a_driver_that_changes_the_sheet_is_refused() {
         let letter = (215_900, 279_400);
         let ticket = validated(letter, "Portrait", Some("psk:None"));
-        assert_eq!(verify_ticket(&ticket, Some(letter), false), Ok(letter));
-        assert_eq!(verify_ticket(&ticket, Some((279_400, 215_900)), false), Ok(letter), "either way round");
-        assert_eq!(verify_ticket(&ticket, None, false), Ok(letter), "shrink-to-fit takes the driver's paper");
-        assert!(verify_ticket(&ticket, Some((210_000, 297_000)), false).is_err(), "A4 asked, Letter returned");
-        assert!(verify_ticket(&ticket, Some(letter), true).is_err(), "landscape asked, portrait returned");
-        assert!(verify_ticket(&validated(letter, "Portrait", Some("psk:FitApplicationBleedSizeToPageImageableSize")), Some(letter), false).is_err());
-        assert!(verify_ticket(&validated(letter, "Portrait", Some("ns0000:None")), Some(letter), false).is_ok(), "the IPP class driver's None");
-        assert!(verify_ticket(&validated(letter, "Portrait", None), Some(letter), false).is_ok(), "a driver without scaling");
-        assert!(verify_ticket(&validated((0, 279_400), "Portrait", None), None, false).is_err(), "a roll has no length");
-        assert!(verify_ticket("<not xml", Some(letter), false).is_err());
+        assert_eq!(verify_ticket(&ticket, Some(letter), &[], false), Ok(letter));
+        assert_eq!(verify_ticket(&ticket, Some((279_400, 215_900)), &[], false), Ok(letter), "either way round");
+        assert_eq!(verify_ticket(&ticket, None, &[], false), Ok(letter), "shrink-to-fit takes the driver's paper");
+        assert!(verify_ticket(&ticket, Some((210_000, 297_000)), &[], false).is_err(), "A4 asked, Letter returned");
+        assert!(verify_ticket(&ticket, Some(letter), &[], true).is_err(), "landscape asked, portrait returned");
+        assert!(
+            verify_ticket(&validated(letter, "Portrait", Some("psk:FitApplicationBleedSizeToPageImageableSize")), Some(letter), &[], false).is_err()
+        );
+        assert!(verify_ticket(&validated(letter, "Portrait", Some("ns0000:None")), Some(letter), &[], false).is_ok(), "the IPP class driver's None");
+        assert!(verify_ticket(&validated(letter, "Portrait", None), Some(letter), &[], false).is_ok(), "a driver without scaling");
+        assert!(verify_ticket(&validated((0, 279_400), "Portrait", None), None, &[], false).is_err(), "a roll has no length");
+        assert!(verify_ticket("<not xml", Some(letter), &[], false).is_err());
+    }
+
+    /// A validated ticket whose paper is only an option name, as Epson's WF-C5390 driver returns.
+    fn named_only(option: &str) -> String {
+        validated((1, 1), "Portrait", Some("psk:None")).replace(
+            r#"<psf:Option name="psk:NorthAmericaLetter">
+<psf:ScoredProperty name="psk:MediaSizeWidth"><psf:Value xsi:type="xsd:integer">1</psf:Value></psf:ScoredProperty>
+<psf:ScoredProperty name="psk:MediaSizeHeight"><psf:Value xsi:type="xsd:integer">1</psf:Value></psf:ScoredProperty>
+</psf:Option>"#,
+            &format!(r#"<psf:Option name="{option}"/>"#),
+        )
+    }
+
+    #[test]
+    fn a_paper_the_ticket_only_names_takes_its_size_from_the_capabilities() {
+        let a4 = (210_000, 297_000);
+        let papers = [
+            Paper { width: 215_900, height: 279_400, name: Some("Letter"), keyword: true, option: Some((NS_PSK, "NorthAmericaLetter")) },
+            Paper { width: a4.0, height: a4.1, name: Some("A4 210 x 297 mm"), keyword: false, option: Some(("http://example.com/vendor", "EPA4")) },
+            Paper { width: 210_000, height: 0, name: Some("Roll 210 mm"), keyword: false, option: Some(("http://example.com/vendor", "Roll")) },
+        ];
+        let ticket = named_only("ns0000:EPA4");
+        assert!(!ticket.contains("MediaSizeWidth"));
+        assert_eq!(verify_ticket(&ticket, Some(a4), &papers, false), Ok(a4));
+        assert_eq!(verify_ticket(&ticket, None, &papers, false), Ok(a4), "shrink-to-fit too");
+        assert!(verify_ticket(&ticket, Some((215_900, 279_400)), &papers, false).is_err(), "Letter asked, A4 named");
+        assert!(verify_ticket(&ticket, Some(a4), &[], false).is_err(), "without capabilities the size is unknown");
+        assert!(verify_ticket(&named_only("psk:EPA4"), Some(a4), &papers, false).is_err(), "the namespace counts, not just the name");
+        assert!(verify_ticket(&named_only("ns0000:Roll"), None, &papers, false).is_err(), "a roll still has no length");
+        assert!(verify_ticket(&named_only("ns0000:Unlisted"), Some(a4), &papers, false).is_err());
+        assert_eq!(verify_ticket(&named_only("psk:NorthAmericaLetter"), Some((215_900, 279_400)), &papers, false), Ok((215_900, 279_400)));
+    }
+
+    #[test]
+    fn a_custom_paper_reads_its_size_from_the_parameters() {
+        let ticket = named_only("psk:CustomMediaSize").replace(
+            r#"<psf:Option name="psk:CustomMediaSize"/></psf:Feature>"#,
+            r#"<psf:Option name="psk:CustomMediaSize">
+<psf:ScoredProperty name="psk:MediaSizeWidth"><psf:ParameterRef name="psk:PageMediaSizeMediaSizeWidth"/></psf:ScoredProperty>
+<psf:ScoredProperty name="psk:MediaSizeHeight"><psf:ParameterRef name="psk:PageMediaSizeMediaSizeHeight"/></psf:ScoredProperty>
+</psf:Option></psf:Feature>
+<psf:ParameterInit name="psk:PageMediaSizeMediaSizeWidth"><psf:Value xsi:type="xsd:integer">127000</psf:Value></psf:ParameterInit>
+<psf:ParameterInit name="psk:PageMediaSizeMediaSizeHeight"><psf:Value xsi:type="xsd:integer">177800</psf:Value></psf:ParameterInit>"#,
+        );
+        assert_eq!(verify_ticket(&ticket, Some((127_000, 177_800)), &[], false), Ok((127_000, 177_800)));
     }
 
     #[test]
@@ -557,7 +640,7 @@ mod tests {
 
     #[test]
     fn the_driver_paper_named_like_the_standard_size_is_preferred() {
-        let paper = |width, height, name, keyword| Paper { width, height, name, keyword };
+        let paper = |width, height, name, keyword| Paper { width, height, name, keyword, option: None };
         // A plotter listing 24 × 36 in three times: a custom entry first, "ARCH D", and one a hair off.
         let papers = [
             paper(609_600, 914_400, Some("Custom 24x36"), false),
