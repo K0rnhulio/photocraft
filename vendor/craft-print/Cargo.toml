@@ -1,0 +1,45 @@
+# Vendored from storytold/craft-libs crates/print at 495e5971bc024aa96e6ed318cb6e7cd3a0103184,
+# patched so a Windows driver that names its paper without restating its size (Epson's
+# WF-C5390, for one) can still print. Drop this copy and the [patch] entry in the workspace
+# Cargo.toml once the fix is in craft-libs and the pin moves past it.
+[package]
+name = "craft-print"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/storytold/craft-libs"
+rust-version = "1.95"
+description = "System PDF print spooler for the Craft apps: CUPS and Windows"
+
+[dependencies]
+# Safe API; Win32 calls are isolated in this maintained MIT OR Apache-2.0 dependency.
+craft-winprint-gdi = { git = "https://github.com/storytold/winprint.rs", rev = "417ac3c4d14d3da5485a99c7d5ce8f05664ec312" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[target.'cfg(windows)'.dependencies]
+# Printing without starting anything (storytold/pdfcraft#1107): the printer list (EnumPrinters)
+# and the job (Windows.Data.Pdf drawn with Direct2D into the XPS print API, options as a
+# PrintTicket) are safe wrappers over Win32 and WinRT (BSD-3-Clause). Its default `pdfium`
+# feature downloads PDFium at build time and is off. The maintained BSD-3-Clause fork
+# preserves terminal failures/cancellation and bounds the completion notification wait.
+# Pinned to an immutable revision; review before bumping.
+winprint = { git = "https://github.com/storytold/winprint.rs", rev = "5f80b9baf6b58937c401656634e42d33f00ddf49", default-features = false }
+# GetDefaultPrinter (MIT).
+winsafe = { version = "0.0.29", default-features = false, features = ["winspool"] }
+# The job file's private folder.
+tempfile = "3"
+# Reading the PrintTicket and PrintCapabilities the driver hands back.
+roxmltree = "0.20"
+# Inflating the print-ready PDF's cross-reference and object streams (src/sheets.rs).
+miniz_oxide = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+roxmltree = "0.20"
+miniz_oxide = "0.8"
