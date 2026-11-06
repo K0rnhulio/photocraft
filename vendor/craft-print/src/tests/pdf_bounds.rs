@@ -418,3 +418,61 @@ fn large_inherited_resources_are_written_once_for_every_copy() {
     assert!(updated.len() < pdf.len() + (4 << 20), "{} bytes", updated.len());
     assert_eq!(read(&updated).unwrap().sheets.len(), 3 * pages);
 }
+
+fn flate_dict() -> Dict {
+    vec![(b"Filter".to_vec(), Obj::Name(b"FlateDecode".to_vec()))]
+}
+
+fn varied(len: usize) -> Vec<u8> {
+    (0..len).map(|i| u8::try_from(i * i % 251).unwrap_or(0)).collect()
+}
+
+#[test]
+fn a_valid_flate_stream_round_trips() {
+    let raw = varied(4000);
+    let packed = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);
+    let mut budget = Budget::default();
+    assert_eq!(decode(&flate_dict(), &packed, &mut budget), Some(raw.clone()));
+    assert_eq!(budget.decoded, raw.len());
+    assert!(!budget.exhausted);
+}
+
+#[test]
+fn a_truncated_flate_stream_yields_only_the_bytes_it_inflated() {
+    let raw = varied(4000);
+    let packed = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 6);
+    let cut = packed.get(..packed.len() * 3 / 4).unwrap_or_default();
+    let mut budget = Budget::default();
+    let got = decode(&flate_dict(), cut, &mut budget).unwrap_or_default();
+    assert!(!got.is_empty() && got.len() < raw.len());
+    assert!(raw.starts_with(&got), "a prefix of the data, with no zero padding");
+    assert!(!budget.exhausted);
+}
+
+#[test]
+fn a_stream_rejected_before_any_output_is_none_not_zeros() {
+    // A zlib header, then a reserved deflate block type: nothing is ever inflated, and the
+    // bare-deflate retry rejects it too.
+    let bad = [0x78, 0x9c, 0x07, 0xff, 0xff, 0xff, 0xff, 0xff];
+    let mut budget = Budget::default();
+    assert!(decode(&flate_dict(), &bad, &mut budget).is_none());
+    assert_eq!(budget.decoded, 0);
+    assert!(!budget.exhausted);
+}
+
+#[test]
+fn a_bare_deflate_stream_still_decodes_through_the_retry() {
+    let raw = varied(500);
+    let packed = miniz_oxide::deflate::compress_to_vec(&raw, 6);
+    let mut budget = Budget::default();
+    assert_eq!(decode(&flate_dict(), &packed, &mut budget), Some(raw));
+}
+
+#[test]
+fn an_over_limit_flate_stream_sets_exhausted() {
+    let packed = miniz_oxide::deflate::compress_to_vec_zlib(&vec![7u8; 4096], 6);
+    let mut budget = Budget { decoded: MAX_DECODED - 100, ..Budget::default() };
+    assert!(decode(&flate_dict(), &packed, &mut budget).is_none());
+    assert!(budget.exhausted);
+    assert_eq!(budget.decoded, MAX_DECODED - 100);
+}
