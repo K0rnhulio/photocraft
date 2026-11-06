@@ -1436,6 +1436,7 @@ async fn convention_tool_hints_match_what_each_tool_does() {
         ("doc_export", EDITS),
         ("doc_close", EDITS),
         ("doc_import_data_sets", EDITS),
+        ("channel_from_image", EDITS),
         ("command_run", EDITS),
         ("command_batch", EDITS),
         ("jobs_cancel", EDITS),
