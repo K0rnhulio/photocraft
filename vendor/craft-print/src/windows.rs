@@ -113,10 +113,25 @@ fn driver_ticket(device: &PrinterDevice, job: &Job, sheet: (f64, f64), landscape
     }
     let mut builder = PrintTicketBuilder::new(device).map_err(spool_error)?;
     builder.merge(PrintTicket::from(document)).map_err(spool_error)?;
-    let validated = builder.build().map_err(spool_error)?;
+    let validated = in_drivers_spelling(device, builder.build().map_err(spool_error)?);
     let xml = std::str::from_utf8(validated.get_xml()).map_err(spool_error)?;
     let paper = ticket::verify_ticket(xml, wanted, &papers, landscape)?;
     Ok((validated, paper))
+}
+
+/// The ticket with the driver's vendor namespaces under the prefixes the driver declares them with
+/// ([`ticket::respell`]). Windows' merge renames them (`brpsk` to `ns0000`) when the merged ticket
+/// uses one of the driver's names, such as its own paper option, and a Brother driver then fails
+/// every page of the job with 0x80040003. The driver's prefixes are those of its own default ticket
+/// (an empty one, validated). The ticket as it is when they can't be read.
+fn in_drivers_spelling(device: &PrinterDevice, ticket: PrintTicket) -> PrintTicket {
+    let spelled = (|| {
+        let mut builder = PrintTicketBuilder::new(device).ok()?;
+        builder.merge(PrintTicket::from_xml(ticket::empty_ticket())).ok()?;
+        let own = builder.build().ok()?;
+        ticket::respell(std::str::from_utf8(ticket.get_xml()).ok()?, std::str::from_utf8(own.get_xml()).ok()?)
+    })();
+    spelled.map_or(ticket, PrintTicket::from_xml)
 }
 
 /// The widest unprintable margin of the ticket's paper, in points; 0 when the driver doesn't say.
@@ -255,6 +270,14 @@ mod tests {
         let (ticket, paper) = driver_ticket(&device, &job, (612.0, 792.0), false).unwrap();
         ticket::verify_job_options(std::str::from_utf8(ticket.get_xml()).unwrap(), &job, 1, ticket::Offered::default()).unwrap();
         assert_eq!(paper, (215_900, 279_400));
+        // The ticket names the driver's vendor namespaces as the driver does (the merge renamed them).
+        // `respell` returning `None` would not show it: it also does when it refused the ticket.
+        let mut own = PrintTicketBuilder::new(&device).unwrap();
+        own.merge(PrintTicket::from_xml(ticket::empty_ticket())).unwrap();
+        let own = own.build().unwrap();
+        let unlike =
+            ticket::prefixes_unlike_the_drivers(std::str::from_utf8(ticket.get_xml()).unwrap(), std::str::from_utf8(own.get_xml()).unwrap()).unwrap();
+        assert!(unlike.is_empty(), "vendor namespaces under another prefix than the driver's (namespace, ticket, driver): {unlike:?}");
         eprintln!("unprintable margin: {} pt", imageable_margin(&device, &ticket));
         if let Ok(path) = std::env::var("CRAFT_PRINT_TEST_TICKET_OUTPUT") {
             std::fs::write(path, ticket.get_xml()).unwrap();

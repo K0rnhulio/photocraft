@@ -517,6 +517,53 @@ fn indirect<'a>(data: &'a [u8], offset: usize, budget: &mut Budget) -> Option<In
     Some(Indirect { num, obj, stream })
 }
 
+/// How an inflate ended.
+enum Inflated {
+    /// The whole stream, within the limit.
+    Done(Vec<u8>),
+    /// The output would pass the limit.
+    Exhausted,
+    /// A damaged or truncated stream: only the bytes actually written before the damage.
+    Damaged(Vec<u8>),
+}
+
+/// Inflate `raw` (zlib-wrapped or bare deflate) to at most `limit` bytes. Unlike the
+/// `decompress_to_vec*` helpers it reports the bytes the decompressor really wrote, so a stream
+/// rejected early yields an empty `Damaged`, never the zero-filled output buffer.
+fn inflate(raw: &[u8], zlib: bool, limit: usize) -> Inflated {
+    use miniz_oxide::inflate::TINFLStatus;
+    use miniz_oxide::inflate::core::{DecompressorOxide, decompress, inflate_flags};
+    let flags = inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF | if zlib { inflate_flags::TINFL_FLAG_PARSE_ZLIB_HEADER } else { 0 };
+    let mut out = vec![0u8; raw.len().saturating_mul(2).max(64).min(limit)];
+    let mut state = Box::<DecompressorOxide>::default();
+    let (mut input, mut written) = (raw, 0usize);
+    loop {
+        let (status, consumed, wrote) = decompress(&mut state, input, &mut out, written, flags);
+        written = written.saturating_add(wrote).min(out.len());
+        match status {
+            TINFLStatus::Done => {
+                out.truncate(written);
+                return Inflated::Done(out);
+            }
+            TINFLStatus::HasMoreOutput => {
+                if out.len() >= limit {
+                    return Inflated::Exhausted;
+                }
+                let Some(rest) = input.get(consumed..) else {
+                    out.truncate(written);
+                    return Inflated::Damaged(out);
+                };
+                input = rest;
+                out.resize(out.len().saturating_mul(2).min(limit), 0);
+            }
+            _ => {
+                out.truncate(written);
+                return Inflated::Damaged(out);
+            }
+        }
+    }
+}
+
 /// A stream's data with its filters undone: FlateDecode (with PNG predictors), or none.
 fn decode(dict: &Dict, raw: &[u8], budget: &mut Budget) -> Option<Vec<u8>> {
     if budget.exhausted {
@@ -547,20 +594,22 @@ fn decode(dict: &Dict, raw: &[u8], budget: &mut Budget) -> Option<Vec<u8>> {
             Some(raw.to_vec())
         }
         [b"FlateDecode" | b"Fl"] => {
-            let inflated = match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(raw, limit) {
-                Ok(v) => v,
-                Err(e) if e.status == miniz_oxide::inflate::TINFLStatus::HasMoreOutput => {
+            let inflated = match inflate(raw, true, limit) {
+                Inflated::Done(v) => v,
+                Inflated::Exhausted => {
                     budget.exhausted = true;
                     return None;
                 }
                 // A damaged stream: what inflated before the damage, as other readers do.
-                Err(e) if !e.output.is_empty() => e.output,
-                Err(_) => match miniz_oxide::inflate::decompress_to_vec_with_limit(raw, limit) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        budget.exhausted |= e.status == miniz_oxide::inflate::TINFLStatus::HasMoreOutput;
+                Inflated::Damaged(v) if !v.is_empty() => v,
+                // Rejected before any output: retry as a bare deflate stream.
+                Inflated::Damaged(_) => match inflate(raw, false, limit) {
+                    Inflated::Done(v) => v,
+                    Inflated::Exhausted => {
+                        budget.exhausted = true;
                         return None;
                     }
+                    Inflated::Damaged(_) => return None,
                 },
             };
             unpredict(&inflated, parms, limit)
