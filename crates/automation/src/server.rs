@@ -1293,7 +1293,6 @@ impl PhotocraftMcp {
                 p.pcraft_full_composite.is_some().then_some("pcraftFullComposite"),
                 dpx_bits.is_some().then_some("dpxBits"),
                 p.pdf_spot_plates.is_some().then_some("pdfSpotPlates"),
-                p.index.is_some().then_some("index"),
             ]
             .into_iter()
             .flatten()
