@@ -1636,13 +1636,18 @@ fn late_app(port: u16, delay: std::time::Duration) -> tokio::task::JoinHandle<()
         let (sock, _) = listener.accept().await.unwrap();
         let (r, mut w) = sock.into_split();
         let mut lines = BufReader::new(r).lines();
+        let mut handshake = photocraft_automation::security::ServerHandshake::new();
+        let mut authenticated = false;
         while let Ok(Some(line)) = lines.next_line().await {
             let req: Value = serde_json::from_str(&line).unwrap();
-            let result = match req["method"].as_str() {
-                Some("auth") => json!({"authenticated": true}),
-                _ => json!({"active": null, "documents": []}),
+            let reply = if authenticated {
+                json!({"id": req["id"], "ok": true, "result": {"active": null, "documents": []}})
+            } else {
+                let (reply, step) = handshake.reply(&line, CONTROL_TOKEN);
+                authenticated = step == photocraft_automation::security::AuthStep::Authenticated;
+                reply
             };
-            w.write_all(format!("{}\n", json!({"id": req["id"], "ok": true, "result": result})).as_bytes()).await.unwrap();
+            w.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
         }
     })
 }
