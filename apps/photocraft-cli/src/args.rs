@@ -521,7 +521,7 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Cli, clap::Error> {
                     return Err(ServerOptionError::LaunchNeedsBridge.into_clap(sub));
                 }
                 // With --launch the roots go to the app this starts.
-                if a.bridge.is_some() && a.launch.is_none() && (a.automation.automation_read_root.is_some() || a.automation.automation_write_root.is_some()) {
+                if a.bridge.is_some() && a.launch.is_none() && (!a.automation.automation_read_root.is_empty() || a.automation.automation_write_root.is_some()) {
                     return Err(ServerOptionError::BridgeRoots.into_clap(sub));
                 }
                 if a.bridge.is_some() && (m.value_source("gpu") == Some(ValueSource::CommandLine) || m.value_source("no_gpu") == Some(ValueSource::CommandLine))
