@@ -128,7 +128,7 @@ fn launcher(app: &Path, bridge: &Bridge, token_file: &Path, a: &McpArgs) -> Resu
     }
     let absolute = |p: &Path| -> std::io::Result<PathBuf> { std::path::absolute(p) };
     let mut args: Vec<OsString> = vec!["--control".into(), port.to_string().into(), "--control-token-file".into(), absolute(token_file)?.into()];
-    if let Some(root) = &a.automation.automation_read_root {
+    for root in &a.automation.automation_read_root {
         args.extend(["--automation-read-root".into(), absolute(root)?.into()]);
     }
     if let Some(root) = &a.automation.automation_write_root {
